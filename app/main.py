@@ -7,10 +7,12 @@ app = FastAPI()
 def health():
     return {"status": "ok"}
 
-class message :
+
+class Message:
     role = str
     content = str
 
-class ChatRequest :
-    model : str
-    messages : message
+
+class ChatRequest:
+    model: str
+    messages: Message
