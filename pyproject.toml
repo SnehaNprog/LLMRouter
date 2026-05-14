@@ -39,3 +39,12 @@ python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 files = ["app", "tests"]
+mypy_path = "."
+explicit_package_bases = true
+namespace_packages = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
