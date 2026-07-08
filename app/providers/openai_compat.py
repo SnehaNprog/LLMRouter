@@ -3,7 +3,8 @@ from collections.abc import AsyncIterator
 import httpx
 
 from app.providers.base import Provider
-from app.providers.errors import ProviderError
+from app.providers.errors import ProviderDown
+from app.providers.http_errors import error_for_response, translate_transport_errors
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse
 
@@ -33,17 +34,16 @@ class OpenAICompatibleProvider(Provider):
     async def chat(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         payload = request.model_dump(mode="json", exclude_none=True)
         payload["stream"] = False
-        response = await self._client.post(
-            f"{self._base_url}/chat/completions", json=payload, headers=self._headers()
-        )
-        if response.is_error:
-            # Refined into specific domain errors in the next commit.
-            raise ProviderError(
-                f"{self.name} returned HTTP {response.status_code}",
-                provider=self.name,
-                upstream_status=response.status_code,
+        async with translate_transport_errors(self.name):
+            response = await self._client.post(
+                f"{self._base_url}/chat/completions", json=payload, headers=self._headers()
             )
-        return ChatCompletionResponse.model_validate(response.json())
+        if response.is_error:
+            raise error_for_response(self.name, response)
+        try:
+            return ChatCompletionResponse.model_validate(response.json())
+        except ValueError as exc:  # invalid JSON or a body that is not a completion
+            raise ProviderDown(f"{self.name}: unreadable response", provider=self.name) from exc
 
     def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
         raise NotImplementedError("streaming is added in a later commit")
