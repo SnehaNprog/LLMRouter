@@ -7,7 +7,12 @@ import httpx
 
 from app.providers.base import Provider
 from app.providers.errors import BadRequest, ProviderDown
-from app.providers.http_errors import error_for_response, translate_transport_errors
+from app.providers.http_errors import (
+    error_for_response,
+    error_for_stream_event,
+    translate_transport_errors,
+)
+from app.providers.sse import iter_sse
 from app.schemas.chat import (
     ChatCompletionRequest,
     ContentPart,
@@ -21,6 +26,10 @@ from app.schemas.completion import (
     ChatCompletionChunk,
     ChatCompletionResponse,
     Choice,
+    ChunkChoice,
+    Delta,
+    DeltaFunctionCall,
+    DeltaToolCall,
     FinishReason,
     ResponseMessage,
     Usage,
@@ -98,7 +107,9 @@ def _tool_choice(choice: Any) -> dict[str, Any]:
     return {"type": "tool", "name": choice.function.name}
 
 
-def translate_request(request: ChatCompletionRequest, default_max_tokens: int) -> dict[str, Any]:
+def translate_request(
+    request: ChatCompletionRequest, default_max_tokens: int, *, stream: bool = False
+) -> dict[str, Any]:
     """OpenAI chat request -> Anthropic Messages request."""
     if request.n != 1:
         raise BadRequest("anthropic does not support n > 1", provider="anthropic")
@@ -139,7 +150,7 @@ def translate_request(request: ChatCompletionRequest, default_max_tokens: int) -
         "model": request.model,
         "max_tokens": request.max_tokens or default_max_tokens,
         "messages": messages,
-        "stream": False,
+        "stream": stream,
     }
     if system_parts:
         payload["system"] = "\n\n".join(system_parts)
@@ -202,6 +213,70 @@ def translate_response(data: dict[str, Any]) -> ChatCompletionResponse:
     )
 
 
+class StreamTranslator:
+    """Turns Anthropic's streaming events into OpenAI chunks, one event at a time."""
+
+    def __init__(self) -> None:
+        self._id = ""
+        self._model = ""
+        self._created = int(time.time())
+        self._input_tokens = 0
+        self._tool_index_by_block: dict[int, int] = {}
+
+    def _chunk(
+        self, delta: Delta, finish: FinishReason | None = None, usage: Usage | None = None
+    ) -> ChatCompletionChunk:
+        return ChatCompletionChunk(
+            id=self._id,
+            created=self._created,
+            model=self._model,
+            choices=[ChunkChoice(index=0, delta=delta, finish_reason=finish)],
+            usage=usage,
+        )
+
+    def feed(self, event_type: str, data: dict[str, Any]) -> list[ChatCompletionChunk]:
+        if event_type == "message_start":
+            message = data["message"]
+            self._id = message["id"]
+            self._model = message["model"]
+            self._input_tokens = message.get("usage", {}).get("input_tokens", 0)
+            return [self._chunk(Delta(role="assistant", content=""))]
+
+        if event_type == "content_block_start":
+            block = data["content_block"]
+            if block["type"] != "tool_use":
+                return []
+            tool_index = len(self._tool_index_by_block)
+            self._tool_index_by_block[data["index"]] = tool_index
+            call = DeltaToolCall(
+                index=tool_index,
+                id=block["id"],
+                type="function",
+                function=DeltaFunctionCall(name=block["name"], arguments=""),
+            )
+            return [self._chunk(Delta(tool_calls=[call]))]
+
+        if event_type == "content_block_delta":
+            delta = data["delta"]
+            if delta["type"] == "text_delta":
+                return [self._chunk(Delta(content=delta["text"]))]
+            if delta["type"] == "input_json_delta":
+                call = DeltaToolCall(
+                    index=self._tool_index_by_block[data["index"]],
+                    function=DeltaFunctionCall(arguments=delta["partial_json"]),
+                )
+                return [self._chunk(Delta(tool_calls=[call]))]
+            return []  # e.g. thinking deltas
+
+        if event_type == "message_delta":
+            reason = _FINISH_REASONS.get(data["delta"].get("stop_reason") or "", "stop")
+            output_tokens = data.get("usage", {}).get("output_tokens", 0)
+            usage = Usage.of(self._input_tokens, output_tokens)
+            return [self._chunk(Delta(), finish=reason, usage=usage)]
+
+        return []  # ping, content_block_stop, message_stop
+
+
 class AnthropicProvider(Provider):
     def __init__(
         self,
@@ -238,5 +313,36 @@ class AnthropicProvider(Provider):
         except (ValueError, KeyError, TypeError) as exc:
             raise ProviderDown(f"{self.name}: unreadable response", provider=self.name) from exc
 
-    def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
-        raise NotImplementedError("streaming is added in a later commit")
+    async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
+        payload = translate_request(request, self._default_max_tokens, stream=True)
+        http_request = self._client.build_request(
+            "POST", f"{self._base_url}/v1/messages", json=payload, headers=self._headers()
+        )
+        async with translate_transport_errors(self.name):
+            response = await self._client.send(http_request, stream=True)
+        translator = StreamTranslator()
+        try:
+            if response.is_error:
+                await response.aread()
+                raise error_for_response(self.name, response)
+            async with translate_transport_errors(self.name):
+                async for event in iter_sse(response):
+                    for chunk in self._handle(translator, event.event, event.data):
+                        yield chunk
+        finally:
+            await response.aclose()
+
+    def _handle(
+        self, translator: StreamTranslator, event_type: str | None, raw: str
+    ) -> list[ChatCompletionChunk]:
+        try:
+            data = json.loads(raw)
+            kind = event_type or data.get("type", "")
+            if kind == "error":
+                error = data.get("error", {})
+                raise error_for_stream_event(
+                    self.name, str(error.get("type", "")), str(error.get("message", "stream error"))
+                )
+            return translator.feed(kind, data)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ProviderDown(f"{self.name}: unreadable stream event", provider=self.name) from exc

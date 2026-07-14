@@ -62,3 +62,15 @@ async def translate_transport_errors(provider: str) -> AsyncIterator[None]:
         raise ProviderDown(
             f"{provider}: network error ({type(exc).__name__})", provider=provider
         ) from exc
+
+
+def error_for_stream_event(provider: str, error_type: str, message: str) -> ProviderError:
+    """Translate an error event received in the middle of a stream."""
+    text = f"{provider}: {message}"
+    if error_type == "rate_limit_error":
+        return RateLimited(text, provider=provider)
+    if error_type == "authentication_error" or error_type == "permission_error":
+        return AuthFailed(text, provider=provider)
+    if error_type in ("invalid_request_error", "not_found_error"):
+        return BadRequest(text, provider=provider)
+    return ProviderDown(text, provider=provider)  # overloaded_error, api_error, unknown
