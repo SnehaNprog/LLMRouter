@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -10,6 +11,7 @@ class Settings(BaseSettings):
     app_name: str = "LLMRouter"
     environment: Literal["dev", "test", "prod"] = "dev"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    config_path: Path = Path("config.yaml")
     http_connect_timeout: float = 5.0
     http_read_timeout: float = 60.0
     http_write_timeout: float = 10.0

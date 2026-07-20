@@ -1,0 +1,21 @@
+# Copy to config.yaml. API keys are never written here; reference environment variables instead.
+models:
+  # Several entries with the same name form one alias; traffic is split by weight.
+  - name: fast
+    provider: openai_compatible
+    model: llama-3.1-8b-instant
+    base_url: https://api.groq.com/openai/v1
+    api_key: os.environ/GROQ_API_KEY
+    weight: 1
+    rpm: 30
+
+  - name: smart
+    provider: anthropic
+    model: claude-sonnet-5-5
+    api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Local models (Ollama, vLLM) usually need no key.
+  - name: local
+    provider: openai_compatible
+    model: llama3.2
+    base_url: http://localhost:11434/v1

@@ -14,6 +14,7 @@ dependencies = [
     "pydantic==2.13.5",
     "pydantic-settings==2.10.1",
     "httpx==0.28.1",
+    "pyyaml==6.0.3",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,7 @@ dev = [
     "ruff==0.8.4",
     "mypy==1.14.1",
     "openai==2.54.0",
+    "types-PyYAML==6.0.12.20261030",
 ]
 
 [tool.setuptools]
