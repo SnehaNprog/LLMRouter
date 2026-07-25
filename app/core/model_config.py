@@ -73,6 +73,7 @@ class ModelConfig:
     weight: int
     rpm: int | None
     tpm: int | None
+    api_key_env: str | None = None  # name of the variable, never the secret
 
 
 def _format_location(location: tuple[int | str, ...]) -> str:
@@ -100,6 +101,7 @@ def parse_models(raw: object, env: Mapping[str, str] | None = None) -> list[Mode
         if rule_problem:
             problems.append(f"{label}: {rule_problem}")
         secret: SecretStr | None = None
+        variable: str | None = None
         if entry.api_key is not None:
             variable = entry.api_key.removeprefix(ENV_PREFIX)
             value = environment.get(variable, "")
@@ -117,6 +119,7 @@ def parse_models(raw: object, env: Mapping[str, str] | None = None) -> list[Mode
                 weight=entry.weight,
                 rpm=entry.rpm,
                 tpm=entry.tpm,
+                api_key_env=variable,
             )
         )
 
