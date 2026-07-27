@@ -1,18 +1,22 @@
-from fastapi import APIRouter
+import time
+from typing import Annotated
 
+from fastapi import APIRouter, Depends
+
+from app.api.deps import get_router
+from app.router.router import Router
 from app.schemas.models import ModelInfo, ModelList
 
 router = APIRouter(prefix="/v1")
 
-# Static placeholder; replaced by the YAML model registry later.
-_CREATED = 1_730_000_000
-_STATIC_MODELS = [
-    ModelInfo(id="auto", created=_CREATED, owned_by="llmrouter"),
-    ModelInfo(id="stub-small", created=_CREATED, owned_by="llmrouter"),
-    ModelInfo(id="stub-large", created=_CREATED, owned_by="llmrouter"),
-]
+_STARTED = int(time.time())
 
 
 @router.get("/models")
-async def list_models() -> ModelList:
-    return ModelList(data=_STATIC_MODELS)
+async def list_models(gateway: Annotated[Router, Depends(get_router)]) -> ModelList:
+    return ModelList(
+        data=[
+            ModelInfo(id=alias, created=_STARTED, owned_by="llmrouter")
+            for alias in gateway.registry.aliases()
+        ]
+    )

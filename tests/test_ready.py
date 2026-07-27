@@ -1,6 +1,5 @@
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from app.main import app
 
 
 def test_ready_reports_checks(client: TestClient) -> None:
@@ -10,32 +9,32 @@ def test_ready_reports_checks(client: TestClient) -> None:
     assert response.json() == {"status": "ready", "checks": {"config": "ok"}}
 
 
-def test_not_ready_when_a_check_fails(client: TestClient) -> None:
+def test_not_ready_when_a_check_fails(client: TestClient, app_: FastAPI) -> None:
     async def failing() -> bool:
         return False
 
-    original = app.state.readiness_checks
-    app.state.readiness_checks = {**original, "db": failing}
+    original = app_.state.readiness_checks
+    app_.state.readiness_checks = {**original, "db": failing}
     try:
         response = client.get("/ready")
     finally:
-        app.state.readiness_checks = original
+        app_.state.readiness_checks = original
 
     assert response.status_code == 503
     assert response.json()["status"] == "not_ready"
     assert response.json()["checks"]["db"] == "failed"
 
 
-def test_not_ready_when_a_check_raises(client: TestClient) -> None:
+def test_not_ready_when_a_check_raises(client: TestClient, app_: FastAPI) -> None:
     async def exploding() -> bool:
         raise ConnectionError("redis down")
 
-    original = app.state.readiness_checks
-    app.state.readiness_checks = {"redis": exploding}
+    original = app_.state.readiness_checks
+    app_.state.readiness_checks = {"redis": exploding}
     try:
         response = client.get("/ready")
     finally:
-        app.state.readiness_checks = original
+        app_.state.readiness_checks = original
 
     assert response.status_code == 503
     assert response.json()["checks"] == {"redis": "failed"}

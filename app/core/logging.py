@@ -27,9 +27,14 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class _JsonHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """Marks the handler we own, so reconfiguring never touches anyone else's handlers."""
+
+
 def configure_logging(level: str) -> None:
-    handler = logging.StreamHandler()
+    handler = _JsonHandler()
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
-    root.handlers = [handler]
+    root.handlers = [h for h in root.handlers if not isinstance(h, _JsonHandler)]
+    root.addHandler(handler)
     root.setLevel(level)

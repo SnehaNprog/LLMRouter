@@ -54,3 +54,19 @@ def test_json_formatter_outputs_one_json_object() -> None:
     assert data["level"] == "INFO"
     assert data["request_id"] == "rid-9"
     assert data["user_field"] == "v"
+
+
+def test_configure_logging_is_idempotent_and_keeps_foreign_handlers() -> None:
+    from app.core.logging import _JsonHandler, configure_logging
+
+    root = logging.getLogger()
+    foreign = logging.NullHandler()
+    root.addHandler(foreign)
+    try:
+        configure_logging("INFO")
+        configure_logging("INFO")
+
+        assert foreign in root.handlers
+        assert sum(isinstance(h, _JsonHandler) for h in root.handlers) == 1
+    finally:
+        root.removeHandler(foreign)

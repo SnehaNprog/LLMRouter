@@ -11,12 +11,12 @@ def sdk(client: TestClient) -> OpenAI:
 
 def test_chat_completion(sdk: OpenAI) -> None:
     completion = sdk.chat.completions.create(
-        model="gpt-4o-mini",
+        model="test-model",
         messages=[{"role": "user", "content": "Hi"}],
     )
 
     assert completion.object == "chat.completion"
-    assert completion.model == "gpt-4o-mini"
+    assert completion.model == "upstream-model"
     assert completion.choices[0].message.role == "assistant"
     assert completion.choices[0].message.content
     assert completion.choices[0].finish_reason == "stop"
@@ -28,7 +28,7 @@ def test_chat_completion(sdk: OpenAI) -> None:
 
 def test_chat_completion_with_tools_and_multimodal(sdk: OpenAI) -> None:
     completion = sdk.chat.completions.create(
-        model="m",
+        model="test-model",
         messages=[
             {
                 "role": "user",
@@ -54,12 +54,12 @@ def test_chat_completion_with_tools_and_multimodal(sdk: OpenAI) -> None:
 def test_list_models(sdk: OpenAI) -> None:
     models = sdk.models.list()
 
-    assert "auto" in [m.id for m in models.data]
+    assert [m.id for m in models.data] == ["test-model"]
 
 
 def test_bad_request_raises_sdk_error(sdk: OpenAI) -> None:
     with pytest.raises(BadRequestError) as excinfo:
-        sdk.chat.completions.create(model="m", messages=[])
+        sdk.chat.completions.create(model="test-model", messages=[])
 
     assert excinfo.value.status_code == 400
     assert excinfo.value.type == "invalid_request_error"

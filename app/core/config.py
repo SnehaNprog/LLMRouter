@@ -1,7 +1,9 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from dotenv import dotenv_values
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,3 +25,16 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def provider_environment(env_file: Path = Path(".env")) -> dict[str, str]:
+    """Variables that ``os.environ/NAME`` references in the model config may resolve against.
+
+    pydantic-settings reads .env without exporting it, so provider keys kept there would
+    otherwise be invisible. Real environment variables win over .env entries.
+    """
+    values: dict[str, str] = {}
+    if env_file.is_file():
+        values.update({k: v for k, v in dotenv_values(env_file).items() if v is not None})
+    values.update(os.environ)
+    return values

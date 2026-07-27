@@ -1,10 +1,7 @@
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Request
 
-from app.core.config import Settings, get_settings
+from app.core.config import Settings
 
 
 def build_http_client(settings: Settings) -> httpx.AsyncClient:
@@ -20,17 +17,6 @@ def build_http_client(settings: Settings) -> httpx.AsyncClient:
             max_keepalive_connections=settings.http_max_keepalive_connections,
         ),
     )
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """One pooled client for all providers, closed cleanly on shutdown."""
-    client = build_http_client(get_settings())
-    app.state.http_client = client
-    try:
-        yield
-    finally:
-        await client.aclose()
 
 
 def get_http_client(request: Request) -> httpx.AsyncClient:

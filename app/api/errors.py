@@ -1,11 +1,20 @@
 import logging
+import math
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.schemas.error import ErrorResponse
+from app.providers.errors import (
+    AuthFailed,
+    BadRequest,
+    ProviderError,
+    RateLimited,
+    Timeout,
+)
+from app.router.registry import UnknownModelError
+from app.schemas.error import ErrorBody, ErrorResponse
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +44,52 @@ def error_response(
     return JSONResponse(status_code=status_code, content=body.model_dump(), headers=headers)
 
 
+def describe_provider_error(exc: ProviderError) -> tuple[int, ErrorBody]:
+    """Gateway status and OpenAI-style body for a failure reported by an upstream provider."""
+    if isinstance(exc, RateLimited):
+        return 429, ErrorBody(
+            message=exc.message, type="rate_limit_error", code="upstream_rate_limited"
+        )
+    if isinstance(exc, AuthFailed):
+        # The caller's key is fine; our credentials for the vendor are not. Do not blame the caller.
+        return 502, ErrorBody(
+            message="The upstream provider rejected the gateway's credentials",
+            type="api_error",
+            code="upstream_auth_failed",
+        )
+    if isinstance(exc, Timeout):
+        return 504, ErrorBody(
+            message="The upstream provider timed out", type="api_error", code="upstream_timeout"
+        )
+    if isinstance(exc, BadRequest):
+        return 400, ErrorBody(
+            message=exc.message, type="invalid_request_error", code="upstream_bad_request"
+        )
+    return 502, ErrorBody(message=exc.message, type="api_error", code="upstream_unavailable")
+
+
+async def _provider_error_handler(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, ProviderError)
+    status, body = describe_provider_error(exc)
+    headers = None
+    if isinstance(exc, RateLimited) and exc.retry_after is not None:
+        headers = {"Retry-After": str(math.ceil(exc.retry_after))}
+    logger.warning(
+        "upstream provider error",
+        extra={"provider": exc.provider, "upstream_status": exc.upstream_status},
+    )
+    return JSONResponse(
+        status_code=status, content=ErrorResponse(error=body).model_dump(), headers=headers
+    )
+
+
+async def _unknown_model_handler(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, UnknownModelError)
+    return error_response(
+        404, str(exc), type="invalid_request_error", param="model", code="model_not_found"
+    )
+
+
 async def _http_exception_handler(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, StarletteHTTPException)
     return error_response(exc.status_code, str(exc.detail), headers=dict(exc.headers or {}))
@@ -57,4 +112,6 @@ async def _unhandled_exception_handler(_: Request, exc: Exception) -> JSONRespon
 def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)
     app.add_exception_handler(RequestValidationError, _validation_exception_handler)
+    app.add_exception_handler(ProviderError, _provider_error_handler)
+    app.add_exception_handler(UnknownModelError, _unknown_model_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)

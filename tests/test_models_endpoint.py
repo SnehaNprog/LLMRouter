@@ -14,7 +14,7 @@ def test_models_list_matches_openai_shape(client: TestClient) -> None:
         assert entry["object"] == "model"
 
 
-def test_models_list_parses_and_includes_auto(client: TestClient) -> None:
+def test_models_list_comes_from_the_registry(client: TestClient) -> None:
     parsed = ModelList.model_validate(client.get("/v1/models").json())
 
-    assert "auto" in [m.id for m in parsed.data]
+    assert [m.id for m in parsed.data] == ["test-model"]
