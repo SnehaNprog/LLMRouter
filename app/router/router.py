@@ -1,7 +1,9 @@
+import random
 from collections.abc import AsyncIterator
 
 from app.router.deployment import Deployment
 from app.router.registry import ModelRegistry
+from app.router.selection import weighted_choice
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse
 
@@ -9,15 +11,16 @@ from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse
 class Router:
     """Sends a request to a deployment of the requested alias.
 
-    Passthrough for now: the first deployment of the alias serves the request.
-    Selection, retries and fallbacks are layered on in the following commits.
+    Deployments are picked at random in proportion to their weight. Retries and
+    fallbacks are layered on in the following commits.
     """
 
-    def __init__(self, registry: ModelRegistry) -> None:
+    def __init__(self, registry: ModelRegistry, rng: random.Random | None = None) -> None:
         self.registry = registry
+        self._rng = rng or random.Random()
 
     def select(self, alias: str) -> Deployment:
-        return self.registry.get(alias)[0]
+        return weighted_choice(self.registry.get(alias), self._rng)
 
     @staticmethod
     def _upstream_request(
