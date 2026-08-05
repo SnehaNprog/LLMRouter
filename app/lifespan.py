@@ -9,6 +9,7 @@ from app.core.config import Settings, provider_environment
 from app.core.http import build_http_client
 from app.core.model_config import ConfigError, load_models
 from app.router.registry import ModelRegistry, build_registry
+from app.router.retry import RetryPolicy
 from app.router.router import Router
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,14 @@ def make_lifespan(
                 logger.error("startup aborted: %s", exc)
                 raise
             app.state.registry = registry
-            app.state.router = Router(registry)
+            app.state.router = Router(
+                registry,
+                policy=RetryPolicy(
+                    max_attempts=settings.retry_max_attempts,
+                    base_delay=settings.retry_base_delay,
+                    max_delay=settings.retry_max_delay,
+                ),
+            )
             logger.info(
                 "model config loaded",
                 extra={"aliases": registry.aliases(), "deployments": len(registry)},

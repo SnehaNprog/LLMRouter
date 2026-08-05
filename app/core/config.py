@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     http_read_timeout: float = 60.0
     http_write_timeout: float = 10.0
     http_pool_timeout: float = 5.0
+    retry_max_attempts: int = 3
+    retry_base_delay: float = 0.5
+    retry_max_delay: float = 8.0
     http_max_connections: int = 100
     http_max_keepalive_connections: int = 20
 

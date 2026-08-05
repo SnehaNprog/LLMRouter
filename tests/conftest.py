@@ -51,7 +51,7 @@ def app_(provider: FakeProvider) -> FastAPI:
     def registry_factory(_: httpx.AsyncClient) -> ModelRegistry:
         return registry_with(provider)
 
-    return create_app(Settings(_env_file=None), registry_factory)
+    return create_app(Settings(_env_file=None, retry_base_delay=0.0), registry_factory)
 
 
 @pytest.fixture

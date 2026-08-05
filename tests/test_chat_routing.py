@@ -26,11 +26,14 @@ from tests.conftest import UPSTREAM_MODEL, registry_with
 BODY = {"model": "test-model", "messages": [{"role": "user", "content": "Hi"}]}
 
 
-def client_for(provider: FakeProvider) -> TestClient:
+def client_for(provider: FakeProvider, attempts: int = 1) -> TestClient:
+    """Single attempt by default, so error-mapping tests do not exercise (or wait on) retries."""
+
     def factory(_: httpx.AsyncClient) -> ModelRegistry:
         return registry_with(provider)
 
-    return TestClient(create_app(Settings(_env_file=None), factory))
+    settings = Settings(_env_file=None, retry_base_delay=0.0, retry_max_attempts=attempts)
+    return TestClient(create_app(settings, factory))
 
 
 def sse_events(text: str) -> list[str]:
@@ -78,7 +81,7 @@ def test_unknown_model_is_an_openai_shaped_404(client: TestClient) -> None:
 def test_provider_errors_map_to_gateway_errors(
     error: ProviderError, status: int, error_type: str, code: str
 ) -> None:
-    client = client_for(FakeProvider(fail_first=1, error_factory=lambda: error))
+    client = client_for(FakeProvider(fail_first=99, error_factory=lambda: error))
 
     with client:
         response = client.post("/v1/chat/completions", json=BODY)
@@ -92,7 +95,7 @@ def test_provider_errors_map_to_gateway_errors(
 
 def test_rate_limit_keeps_retry_after() -> None:
     client = client_for(
-        FakeProvider(fail_first=1, error_factory=lambda: RateLimited("x", retry_after=2.2))
+        FakeProvider(fail_first=99, error_factory=lambda: RateLimited("x", retry_after=2.2))
     )
 
     with client:
@@ -128,7 +131,7 @@ def test_stream_unknown_model_is_a_normal_404(client: TestClient) -> None:
 
 def test_stream_failure_before_first_chunk_is_a_real_http_error() -> None:
     client = client_for(
-        FakeProvider(fail_first=1, error_factory=lambda: RateLimited("slow", retry_after=1))
+        FakeProvider(fail_first=99, error_factory=lambda: RateLimited("slow", retry_after=1))
     )
 
     with client:
@@ -172,3 +175,34 @@ def test_openai_sdk_can_stream(provider: FakeProvider, app_: FastAPI) -> None:
         text = "".join(c.choices[0].delta.content or "" for c in stream if c.choices)
 
     assert text == "streamed words here"
+
+
+def test_transient_failures_are_retried_transparently() -> None:
+    provider = FakeProvider(fail_first=2)
+
+    with client_for(provider, attempts=3) as client:
+        response = client.post("/v1/chat/completions", json=BODY)
+
+    assert response.status_code == 200
+    assert provider.calls == 3
+
+
+def test_stream_start_failures_are_retried_transparently() -> None:
+    provider = FakeProvider(reply="ok then", fail_first=2)
+
+    with client_for(provider, attempts=3) as client:
+        response = client.post("/v1/chat/completions", json={**BODY, "stream": True})
+
+    assert response.status_code == 200
+    assert sse_events(response.text)[-1] == "[DONE]"
+    assert provider.calls == 3
+
+
+def test_gives_up_after_max_attempts() -> None:
+    provider = FakeProvider(fail_first=99)
+
+    with client_for(provider, attempts=3) as client:
+        response = client.post("/v1/chat/completions", json=BODY)
+
+    assert response.status_code == 502
+    assert provider.calls == 3
