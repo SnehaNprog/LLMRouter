@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from app.core.config import Settings, provider_environment
 from app.core.http import build_http_client
-from app.core.model_config import ConfigError, load_models
+from app.core.model_config import ConfigError, load_config
 from app.router.registry import ModelRegistry, build_registry
 from app.router.retry import RetryPolicy
 from app.router.router import Router
@@ -19,8 +19,8 @@ RegistryFactory = Callable[[httpx.AsyncClient], ModelRegistry]
 
 def default_registry_factory(settings: Settings) -> RegistryFactory:
     def factory(client: httpx.AsyncClient) -> ModelRegistry:
-        configs = load_models(settings.config_path, provider_environment())
-        return build_registry(configs, client)
+        config = load_config(settings.config_path, provider_environment())
+        return build_registry(config.models, client, config.fallbacks)
 
     return factory
 

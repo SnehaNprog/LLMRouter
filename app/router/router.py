@@ -21,7 +21,7 @@ class Router:
     Deployments are picked at random in proportion to their weight. After a failure the
     router prefers a deployment it has not tried yet and moves on immediately; only when it
     must hit a deployment again does it wait, with exponential backoff and jitter.
-    Fallback chains are layered on in the next commit.
+    When every retry on an alias has failed, the next alias in its fallback chain is tried.
     """
 
     def __init__(
@@ -91,22 +91,41 @@ class Router:
                 if delay > 0:
                     await self._sleep(delay)
 
-    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
-        deployments = self.registry.get(request.model)
+    async def _across_fallbacks[T](
+        self, alias: str, run: Callable[[Sequence[Deployment]], Awaitable[T]]
+    ) -> T:
+        chain = self.registry.chain(alias)
+        for position, name in enumerate(chain):
+            try:
+                return await run(self.registry.get(name))
+            except Exception as exc:
+                if position == len(chain) - 1 or classify(exc) is Decision.FAIL:
+                    raise
+                logger.warning(
+                    "model exhausted, falling back",
+                    extra={
+                        "model": name,
+                        "fallback": chain[position + 1],
+                        "error": type(exc).__name__,
+                    },
+                )
+        raise AssertionError("unreachable: the chain always has at least one alias")
 
+    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         async def attempt(deployment: Deployment) -> ChatCompletionResponse:
             return await deployment.provider.chat(self._upstream_request(request, deployment))
 
-        return await self._with_retries(deployments, attempt)
+        async def run(deployments: Sequence[Deployment]) -> ChatCompletionResponse:
+            return await self._with_retries(deployments, attempt)
+
+        return await self._across_fallbacks(request.model, run)
 
     def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
         # Unknown aliases raise here, before any iteration, so the API can answer with a 404.
-        deployments = self.registry.get(request.model)
-        return self._stream(request, deployments)
+        self.registry.get(request.model)
+        return self._stream(request)
 
-    async def _stream(
-        self, request: ChatCompletionRequest, deployments: Sequence[Deployment]
-    ) -> AsyncIterator[ChatCompletionChunk]:
+    async def _stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
         async def open_stream(
             deployment: Deployment,
         ) -> tuple[ChatCompletionChunk | None, AsyncIterator[ChatCompletionChunk]]:
@@ -116,9 +135,14 @@ class Router:
             except StopAsyncIteration:
                 return None, stream
 
-        # Only failures before the first chunk are retried; once output has started the
-        # client has seen it, so later errors propagate.
-        first, rest = await self._with_retries(deployments, open_stream)
+        async def run(
+            deployments: Sequence[Deployment],
+        ) -> tuple[ChatCompletionChunk | None, AsyncIterator[ChatCompletionChunk]]:
+            return await self._with_retries(deployments, open_stream)
+
+        # Only failures before the first chunk are retried or fall back; once output has
+        # started the client has seen it, so later errors propagate.
+        first, rest = await self._across_fallbacks(request.model, run)
         if first is not None:
             yield first
         async for chunk in rest:

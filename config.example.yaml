@@ -19,3 +19,7 @@ models:
     provider: openai_compatible
     model: llama3.2
     base_url: http://localhost:11434/v1
+
+# When every retry on a model has failed, try these next (transitively, each model once).
+fallbacks:
+  fast: [smart]

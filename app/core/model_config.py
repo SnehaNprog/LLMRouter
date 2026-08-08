@@ -59,6 +59,7 @@ class ModelsFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     models: list[ModelEntry] = Field(min_length=1)
+    fallbacks: dict[str, list[str]] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,13 @@ class ModelConfig:
     api_key_env: str | None = None  # name of the variable, never the secret
 
 
+@dataclass(frozen=True)
+class ModelsConfig:
+    models: list[ModelConfig]
+    # alias -> aliases to try, in order, once every retry on it has failed
+    fallbacks: dict[str, tuple[str, ...]]
+
+
 def _format_location(location: tuple[int | str, ...]) -> str:
     text = ""
     for part in location:
@@ -83,7 +91,7 @@ def _format_location(location: tuple[int | str, ...]) -> str:
     return text
 
 
-def parse_models(raw: object, env: Mapping[str, str] | None = None) -> list[ModelConfig]:
+def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsConfig:
     """Validate parsed YAML and resolve secret references against ``env``."""
     environment = os.environ if env is None else env
     problems: list[str] = []
@@ -123,12 +131,28 @@ def parse_models(raw: object, env: Mapping[str, str] | None = None) -> list[Mode
             )
         )
 
+    aliases = {config.name for config in configs}
+    for source, targets in parsed.fallbacks.items():
+        if source not in aliases:
+            problems.append(f"fallbacks.{source}: unknown model '{source}'")
+        for position, target in enumerate(targets):
+            where = f"fallbacks.{source}[{position}]"
+            if target not in aliases:
+                problems.append(f"{where}: unknown model '{target}'")
+            elif target == source:
+                problems.append(f"{where}: a model cannot fall back to itself")
+
     if problems:
         raise ConfigError("invalid model config:\n  - " + "\n  - ".join(problems))
-    return configs
+    fallbacks = {source: tuple(targets) for source, targets in parsed.fallbacks.items()}
+    return ModelsConfig(models=configs, fallbacks=fallbacks)
 
 
-def load_models(path: Path, env: Mapping[str, str] | None = None) -> list[ModelConfig]:
+def parse_models(raw: object, env: Mapping[str, str] | None = None) -> list[ModelConfig]:
+    return parse_config(raw, env).models
+
+
+def load_config(path: Path, env: Mapping[str, str] | None = None) -> ModelsConfig:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -139,4 +163,8 @@ def load_models(path: Path, env: Mapping[str, str] | None = None) -> list[ModelC
         raise ConfigError(f"{path} is not valid YAML: {exc}") from None
     if not isinstance(raw, dict):
         raise ConfigError(f"{path} must contain a mapping with a top-level 'models' list")
-    return parse_models(raw, env)
+    return parse_config(raw, env)
+
+
+def load_models(path: Path, env: Mapping[str, str] | None = None) -> list[ModelConfig]:
+    return load_config(path, env).models
