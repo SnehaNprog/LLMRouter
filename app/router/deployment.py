@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from app.core.model_config import ModelConfig
 from app.providers.base import Provider
+from app.router.cost import cost_usd
 
 
 def deployment_id(config: ModelConfig) -> str:
@@ -42,3 +43,6 @@ class Deployment:
     @property
     def weight(self) -> int:
         return self.config.weight
+
+    def cost(self, prompt_tokens: int, completion_tokens: int) -> float:
+        return cost_usd(self.config, prompt_tokens, completion_tokens)

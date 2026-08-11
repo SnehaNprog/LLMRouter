@@ -29,6 +29,9 @@ class ModelEntry(BaseModel):
     weight: int = Field(default=1, ge=1)
     rpm: int | None = Field(default=None, gt=0)
     tpm: int | None = Field(default=None, gt=0)
+    # USD per million tokens; 0 means free (local models). Set these from your vendor's price list.
+    input_cost_per_mtok: float = Field(default=0.0, ge=0)
+    output_cost_per_mtok: float = Field(default=0.0, ge=0)
 
     @field_validator("api_key")
     @classmethod
@@ -75,6 +78,8 @@ class ModelConfig:
     rpm: int | None
     tpm: int | None
     api_key_env: str | None = None  # name of the variable, never the secret
+    input_cost_per_mtok: float = 0.0
+    output_cost_per_mtok: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -128,6 +133,8 @@ def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsCon
                 rpm=entry.rpm,
                 tpm=entry.tpm,
                 api_key_env=variable,
+                input_cost_per_mtok=entry.input_cost_per_mtok,
+                output_cost_per_mtok=entry.output_cost_per_mtok,
             )
         )
 

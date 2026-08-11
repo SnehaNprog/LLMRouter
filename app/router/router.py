@@ -8,7 +8,7 @@ from app.router.registry import ModelRegistry
 from app.router.retry import Decision, RetryPolicy, backoff_delay, classify
 from app.router.selection import weighted_choice
 from app.schemas.chat import ChatCompletionRequest
-from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse
+from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse, Usage
 
 logger = logging.getLogger(__name__)
 
@@ -111,14 +111,36 @@ class Router:
                 )
         raise AssertionError("unreachable: the chain always has at least one alias")
 
-    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
-        async def attempt(deployment: Deployment) -> ChatCompletionResponse:
-            return await deployment.provider.chat(self._upstream_request(request, deployment))
+    @staticmethod
+    def _log_completion(deployment: Deployment, usage: Usage | None) -> None:
+        if usage is None:
+            return
+        logger.info(
+            "completion",
+            extra={
+                "deployment": deployment.id,
+                "model": deployment.upstream_model,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "cost_usd": deployment.cost(usage.prompt_tokens, usage.completion_tokens),
+            },
+        )
 
-        async def run(deployments: Sequence[Deployment]) -> ChatCompletionResponse:
+    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+        async def attempt(
+            deployment: Deployment,
+        ) -> tuple[Deployment, ChatCompletionResponse]:
+            response = await deployment.provider.chat(self._upstream_request(request, deployment))
+            return deployment, response
+
+        async def run(
+            deployments: Sequence[Deployment],
+        ) -> tuple[Deployment, ChatCompletionResponse]:
             return await self._with_retries(deployments, attempt)
 
-        return await self._across_fallbacks(request.model, run)
+        deployment, response = await self._across_fallbacks(request.model, run)
+        self._log_completion(deployment, response.usage)
+        return response
 
     def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
         # Unknown aliases raise here, before any iteration, so the API can answer with a 404.
@@ -126,24 +148,24 @@ class Router:
         return self._stream(request)
 
     async def _stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
-        async def open_stream(
-            deployment: Deployment,
-        ) -> tuple[ChatCompletionChunk | None, AsyncIterator[ChatCompletionChunk]]:
+        opened = tuple[Deployment, ChatCompletionChunk | None, AsyncIterator[ChatCompletionChunk]]
+
+        async def open_stream(deployment: Deployment) -> opened:
             stream = deployment.provider.stream(self._upstream_request(request, deployment))
             try:
-                return await anext(stream), stream
+                return deployment, await anext(stream), stream
             except StopAsyncIteration:
-                return None, stream
+                return deployment, None, stream
 
-        async def run(
-            deployments: Sequence[Deployment],
-        ) -> tuple[ChatCompletionChunk | None, AsyncIterator[ChatCompletionChunk]]:
+        async def run(deployments: Sequence[Deployment]) -> opened:
             return await self._with_retries(deployments, open_stream)
 
         # Only failures before the first chunk are retried or fall back; once output has
         # started the client has seen it, so later errors propagate.
-        first, rest = await self._across_fallbacks(request.model, run)
+        deployment, first, rest = await self._across_fallbacks(request.model, run)
         if first is not None:
+            self._log_completion(deployment, first.usage)
             yield first
         async for chunk in rest:
+            self._log_completion(deployment, chunk.usage)
             yield chunk
