@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     retry_max_attempts: int = 3
     retry_base_delay: float = 0.5
     retry_max_delay: float = 8.0
+    latency_ewma_alpha: float = 0.2
     http_max_connections: int = 100
     http_max_keepalive_connections: int = 20
 

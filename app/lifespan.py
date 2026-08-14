@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from app.core.config import Settings, provider_environment
 from app.core.http import build_http_client
 from app.core.model_config import ConfigError, load_config
+from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry, build_registry
 from app.router.retry import RetryPolicy
 from app.router.router import Router
@@ -47,6 +48,7 @@ def make_lifespan(
                     base_delay=settings.retry_base_delay,
                     max_delay=settings.retry_max_delay,
                 ),
+                latency=LatencyTracker(settings.latency_ewma_alpha),
             )
             logger.info(
                 "model config loaded",

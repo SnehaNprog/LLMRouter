@@ -1,9 +1,11 @@
 import asyncio
 import logging
 import random
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 from app.router.deployment import Deployment
+from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry
 from app.router.retry import Decision, RetryPolicy, backoff_delay, classify
 from app.router.selection import weighted_choice
@@ -22,6 +24,7 @@ class Router:
     router prefers a deployment it has not tried yet and moves on immediately; only when it
     must hit a deployment again does it wait, with exponential backoff and jitter.
     When every retry on an alias has failed, the next alias in its fallback chain is tried.
+    Successful calls feed a per-deployment latency tracker (time to first chunk when streaming).
     """
 
     def __init__(
@@ -31,11 +34,15 @@ class Router:
         policy: RetryPolicy | None = None,
         rng: random.Random | None = None,
         sleep: Sleep = asyncio.sleep,
+        latency: LatencyTracker | None = None,
+        clock: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.registry = registry
         self.policy = policy or RetryPolicy()
+        self.latency = latency or LatencyTracker()
         self._rng = rng or random.Random()
         self._sleep = sleep
+        self._clock = clock
 
     def select(self, alias: str) -> Deployment:
         return weighted_choice(self.registry.get(alias), self._rng)
@@ -130,7 +137,9 @@ class Router:
         async def attempt(
             deployment: Deployment,
         ) -> tuple[Deployment, ChatCompletionResponse]:
+            started = self._clock()
             response = await deployment.provider.chat(self._upstream_request(request, deployment))
+            self.latency.observe(deployment.id, self._clock() - started)
             return deployment, response
 
         async def run(
@@ -151,11 +160,15 @@ class Router:
         opened = tuple[Deployment, ChatCompletionChunk | None, AsyncIterator[ChatCompletionChunk]]
 
         async def open_stream(deployment: Deployment) -> opened:
+            started = self._clock()
             stream = deployment.provider.stream(self._upstream_request(request, deployment))
             try:
-                return deployment, await anext(stream), stream
+                first = await anext(stream)
             except StopAsyncIteration:
                 return deployment, None, stream
+            # For streams the latency that matters to the caller is time to first chunk.
+            self.latency.observe(deployment.id, self._clock() - started)
+            return deployment, first, stream
 
         async def run(deployments: Sequence[Deployment]) -> opened:
             return await self._with_retries(deployments, open_stream)
