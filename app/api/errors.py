@@ -13,6 +13,7 @@ from app.providers.errors import (
     RateLimited,
     Timeout,
 )
+from app.router.context import ContextLengthExceededError
 from app.router.registry import UnknownModelError
 from app.schemas.error import ErrorBody, ErrorResponse
 
@@ -90,6 +91,17 @@ async def _unknown_model_handler(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def _context_length_handler(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, ContextLengthExceededError)
+    return error_response(
+        400,
+        str(exc),
+        type="invalid_request_error",
+        param="messages",
+        code="context_length_exceeded",
+    )
+
+
 async def _http_exception_handler(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, StarletteHTTPException)
     return error_response(exc.status_code, str(exc.detail), headers=dict(exc.headers or {}))
@@ -114,4 +126,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RequestValidationError, _validation_exception_handler)
     app.add_exception_handler(ProviderError, _provider_error_handler)
     app.add_exception_handler(UnknownModelError, _unknown_model_handler)
+    app.add_exception_handler(ContextLengthExceededError, _context_length_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)

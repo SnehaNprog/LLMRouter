@@ -29,6 +29,8 @@ class ModelEntry(BaseModel):
     weight: int = Field(default=1, ge=1)
     rpm: int | None = Field(default=None, gt=0)
     tpm: int | None = Field(default=None, gt=0)
+    # Total tokens (prompt + completion) the model accepts; omit if unknown or unlimited.
+    context_window: int | None = Field(default=None, gt=0)
     # USD per million tokens; 0 means free (local models). Set these from your vendor's price list.
     input_cost_per_mtok: float = Field(default=0.0, ge=0)
     output_cost_per_mtok: float = Field(default=0.0, ge=0)
@@ -80,6 +82,7 @@ class ModelConfig:
     api_key_env: str | None = None  # name of the variable, never the secret
     input_cost_per_mtok: float = 0.0
     output_cost_per_mtok: float = 0.0
+    context_window: int | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +138,7 @@ def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsCon
                 api_key_env=variable,
                 input_cost_per_mtok=entry.input_cost_per_mtok,
                 output_cost_per_mtok=entry.output_cost_per_mtok,
+                context_window=entry.context_window,
             )
         )
 

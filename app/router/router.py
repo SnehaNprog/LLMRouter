@@ -4,11 +4,13 @@ import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
+from app.router.context import ContextLengthExceededError, fits
 from app.router.deployment import Deployment
 from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry
 from app.router.retry import Decision, RetryPolicy, backoff_delay, classify
 from app.router.selection import weighted_choice
+from app.router.tokens import estimate_prompt_tokens
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse, Usage
 
@@ -99,24 +101,47 @@ class Router:
                     await self._sleep(delay)
 
     async def _across_fallbacks[T](
-        self, alias: str, run: Callable[[Sequence[Deployment]], Awaitable[T]]
+        self,
+        request: ChatCompletionRequest,
+        run: Callable[[Sequence[Deployment]], Awaitable[T]],
     ) -> T:
-        chain = self.registry.chain(alias)
+        """Run ``run`` on the request's alias, then on its fallbacks, until one succeeds.
+
+        Deployments whose context window cannot hold the request are skipped; an alias with
+        none left is passed over without being called.
+        """
+        required = estimate_prompt_tokens(request) + (request.max_tokens or 0)
+        chain = self.registry.chain(request.model)
+        last_error: Exception | None = None
+        largest_window = 0
         for position, name in enumerate(chain):
-            try:
-                return await run(self.registry.get(name))
-            except Exception as exc:
-                if position == len(chain) - 1 or classify(exc) is Decision.FAIL:
-                    raise
-                logger.warning(
-                    "model exhausted, falling back",
-                    extra={
-                        "model": name,
-                        "fallback": chain[position + 1],
-                        "error": type(exc).__name__,
-                    },
+            available = self.registry.get(name)
+            candidates = [d for d in available if fits(d, required)]
+            if not candidates:
+                largest_window = max(largest_window, *(d.context_window or 0 for d in available))
+                logger.info(
+                    "model skipped, request exceeds its context window",
+                    extra={"model": name, "required_tokens": required},
                 )
-        raise AssertionError("unreachable: the chain always has at least one alias")
+                continue
+            try:
+                return await run(candidates)
+            except Exception as exc:
+                if classify(exc) is Decision.FAIL:
+                    raise
+                last_error = exc
+                if position < len(chain) - 1:
+                    logger.warning(
+                        "model exhausted, falling back",
+                        extra={
+                            "model": name,
+                            "fallback": chain[position + 1],
+                            "error": type(exc).__name__,
+                        },
+                    )
+        if last_error is not None:
+            raise last_error
+        raise ContextLengthExceededError(window=largest_window, required=required)
 
     @staticmethod
     def _log_completion(deployment: Deployment, usage: Usage | None) -> None:
@@ -147,7 +172,7 @@ class Router:
         ) -> tuple[Deployment, ChatCompletionResponse]:
             return await self._with_retries(deployments, attempt)
 
-        deployment, response = await self._across_fallbacks(request.model, run)
+        deployment, response = await self._across_fallbacks(request, run)
         self._log_completion(deployment, response.usage)
         return response
 
@@ -175,7 +200,7 @@ class Router:
 
         # Only failures before the first chunk are retried or fall back; once output has
         # started the client has seen it, so later errors propagate.
-        deployment, first, rest = await self._across_fallbacks(request.model, run)
+        deployment, first, rest = await self._across_fallbacks(request, run)
         if first is not None:
             self._log_completion(deployment, first.usage)
             yield first

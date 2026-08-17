@@ -44,5 +44,9 @@ class Deployment:
     def weight(self) -> int:
         return self.config.weight
 
+    @property
+    def context_window(self) -> int | None:
+        return self.config.context_window
+
     def cost(self, prompt_tokens: int, completion_tokens: int) -> float:
         return cost_usd(self.config, prompt_tokens, completion_tokens)
