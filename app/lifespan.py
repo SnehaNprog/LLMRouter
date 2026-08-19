@@ -1,6 +1,7 @@
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from functools import partial
 
 import httpx
 from fastapi import FastAPI
@@ -8,6 +9,7 @@ from fastapi import FastAPI
 from app.core.config import Settings, provider_environment
 from app.core.http import build_http_client
 from app.core.model_config import ConfigError, load_config
+from app.db.session import create_engine, create_session_factory, database_ready
 from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry, build_registry
 from app.router.retry import RetryPolicy
@@ -34,6 +36,10 @@ def make_lifespan(
         """Load the model config (failing fast on a bad one), share one HTTP client, clean up."""
         client = build_http_client(settings)
         app.state.http_client = client
+        engine = create_engine(settings.database_url)
+        app.state.db_engine = engine
+        app.state.db_session_factory = create_session_factory(engine)
+        app.state.readiness_checks["database"] = partial(database_ready, engine)
         try:
             try:
                 registry = registry_factory(client)
@@ -57,5 +63,6 @@ def make_lifespan(
             yield
         finally:
             await client.aclose()
+            await engine.dispose()
 
     return lifespan

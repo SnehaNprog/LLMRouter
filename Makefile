@@ -1,10 +1,17 @@
-.PHONY: install dev test lint fmt typecheck check
+.PHONY: install dev migrate migration test lint fmt typecheck check
 
 install:
 	pip install -e ".[dev]"
 
 dev:
 	uvicorn app.main:app --reload
+
+migrate:
+	alembic upgrade head
+
+# usage: make migration m="add something"
+migration:
+	alembic revision --autogenerate -m "$(m)"
 
 test:
 	pytest -q

@@ -17,6 +17,7 @@ from app.router.registry import ModelRegistry
 
 TEST_ALIAS = "test-model"
 UPSTREAM_MODEL = "upstream-model"
+TEST_DATABASE_URL = "sqlite+aiosqlite://"  # in memory, per engine
 
 
 def model_config(
@@ -51,7 +52,10 @@ def app_(provider: FakeProvider) -> FastAPI:
     def registry_factory(_: httpx.AsyncClient) -> ModelRegistry:
         return registry_with(provider)
 
-    return create_app(Settings(_env_file=None, retry_base_delay=0.0), registry_factory)
+    return create_app(
+        Settings(_env_file=None, retry_base_delay=0.0, database_url=TEST_DATABASE_URL),
+        registry_factory,
+    )
 
 
 @pytest.fixture

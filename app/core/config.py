@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     environment: Literal["dev", "test", "prod"] = "dev"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     config_path: Path = Path("config.yaml")
+    database_url: str = "sqlite+aiosqlite:///./llmrouter.db"
     http_connect_timeout: float = 5.0
     http_read_timeout: float = 60.0
     http_write_timeout: float = 10.0

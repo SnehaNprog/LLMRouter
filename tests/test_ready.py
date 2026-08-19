@@ -6,7 +6,10 @@ def test_ready_reports_checks(client: TestClient) -> None:
     response = client.get("/ready")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ready", "checks": {"config": "ok"}}
+    assert response.json() == {
+        "status": "ready",
+        "checks": {"config": "ok", "database": "ok"},
+    }
 
 
 def test_not_ready_when_a_check_fails(client: TestClient, app_: FastAPI) -> None:
