@@ -21,19 +21,19 @@ from app.providers.fake import FakeProvider
 from app.router.registry import ModelRegistry
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk
-from tests.conftest import UPSTREAM_MODEL, registry_with
+from tests.conftest import UPSTREAM_MODEL, AuthedClient, registry_with
 
 BODY = {"model": "test-model", "messages": [{"role": "user", "content": "Hi"}]}
 
 
-def client_for(provider: FakeProvider, attempts: int = 1) -> TestClient:
+def client_for(provider: FakeProvider, attempts: int = 1) -> AuthedClient:
     """Single attempt by default, so error-mapping tests do not exercise (or wait on) retries."""
 
     def factory(_: httpx.AsyncClient) -> ModelRegistry:
         return registry_with(provider)
 
     settings = Settings(_env_file=None, retry_base_delay=0.0, retry_max_attempts=attempts)
-    return TestClient(create_app(settings, factory))
+    return AuthedClient(create_app(settings, factory))
 
 
 def sse_events(text: str) -> list[str]:
@@ -167,8 +167,8 @@ def test_openai_sdk_can_stream(provider: FakeProvider, app_: FastAPI) -> None:
     from openai import OpenAI
 
     provider.reply = "streamed words here"
-    with TestClient(app_) as http:
-        sdk = OpenAI(base_url="http://testserver/v1", api_key="k", http_client=http)
+    with AuthedClient(app_) as http:
+        sdk = OpenAI(base_url="http://testserver/v1", api_key=http.secret, http_client=http)
         stream = sdk.chat.completions.create(
             model="test-model", messages=[{"role": "user", "content": "hi"}], stream=True
         )

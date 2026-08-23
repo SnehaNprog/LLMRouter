@@ -5,7 +5,6 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.core.model_config import ConfigError, load_config, parse_config
@@ -18,7 +17,7 @@ from app.router.registry import ModelRegistry
 from app.router.retry import RetryPolicy
 from app.router.router import Router
 from app.schemas.chat import ChatCompletionRequest, Message
-from tests.conftest import model_config
+from tests.conftest import AuthedClient, model_config
 
 SHORT = "hi"  # about 8 prompt tokens
 LONG = "a" * 800  # about 207 prompt tokens
@@ -257,11 +256,11 @@ async def test_stream_raises_before_yielding_when_nothing_fits() -> None:
 # ---------- over HTTP ----------
 
 
-def client_for(*deployments: Deployment) -> TestClient:
+def client_for(*deployments: Deployment) -> AuthedClient:
     def factory(_: httpx.AsyncClient) -> ModelRegistry:
         return ModelRegistry(deployments)
 
-    return TestClient(create_app(Settings(_env_file=None, retry_base_delay=0.0), factory))
+    return AuthedClient(create_app(Settings(_env_file=None, retry_base_delay=0.0), factory))
 
 
 def test_too_long_request_is_an_openai_shaped_400() -> None:

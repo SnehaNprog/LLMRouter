@@ -7,8 +7,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from app.auth.service import create_api_key
 from app.core.config import Settings
 from app.core.model_config import ModelConfig
+from app.db.base import Base
+from app.db.models import Tenant
 from app.main import create_app
 from app.providers.base import Provider
 from app.providers.fake import FakeProvider
@@ -42,6 +45,39 @@ def registry_with(provider: Provider, **config_overrides: Any) -> ModelRegistry:
     return ModelRegistry([Deployment.create(model_config(**config_overrides), provider)])
 
 
+@pytest.fixture(autouse=True)
+def in_memory_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every app built in a test gets its own throwaway database, never ./llmrouter.db."""
+    monkeypatch.setenv("LLMROUTER_DATABASE_URL", TEST_DATABASE_URL)
+
+
+async def seed_credentials(
+    app: FastAPI, tenant_name: str = "test-tenant", *, active: bool = True
+) -> str:
+    """Create the tables, a tenant and an API key in the app's database; return the secret."""
+    async with app.state.db_engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    async with app.state.db_session_factory() as session:
+        tenant = Tenant(name=tenant_name, is_active=active)
+        session.add(tenant)
+        await session.commit()
+        _, secret = await create_api_key(session, tenant.id, "test key")
+    return secret
+
+
+class AuthedClient(TestClient):
+    """A TestClient that, once started, owns a tenant and sends its API key with every request."""
+
+    secret: str = ""
+
+    def __enter__(self) -> "AuthedClient":
+        super().__enter__()
+        assert self.portal is not None
+        self.secret = self.portal.call(seed_credentials, self.app)
+        self.headers["Authorization"] = f"Bearer {self.secret}"
+        return self
+
+
 @pytest.fixture
 def provider() -> FakeProvider:
     return FakeProvider()
@@ -53,12 +89,12 @@ def app_(provider: FakeProvider) -> FastAPI:
         return registry_with(provider)
 
     return create_app(
-        Settings(_env_file=None, retry_base_delay=0.0, database_url=TEST_DATABASE_URL),
+        Settings(_env_file=None, retry_base_delay=0.0),
         registry_factory,
     )
 
 
 @pytest.fixture
-def client(app_: FastAPI) -> Iterator[TestClient]:
-    with TestClient(app_) as test_client:
+def client(app_: FastAPI) -> Iterator[AuthedClient]:
+    with AuthedClient(app_) as test_client:
         yield test_client

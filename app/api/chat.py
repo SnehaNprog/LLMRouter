@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.api.deps import get_router
 from app.api.errors import describe_provider_error
+from app.auth.dependencies import authenticate
 from app.providers.errors import ProviderError
 from app.router.router import Router
 from app.schemas.chat import ChatCompletionRequest
@@ -15,7 +16,7 @@ from app.schemas.error import ErrorResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1")
+router = APIRouter(prefix="/v1", dependencies=[Depends(authenticate)])
 
 
 def _sse(payload: str) -> str:

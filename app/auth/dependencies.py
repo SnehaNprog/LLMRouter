@@ -1,0 +1,63 @@
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Annotated
+
+from fastapi import Depends, Request
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.auth.errors import InvalidApiKeyError, MissingApiKeyError, TenantDeactivatedError
+from app.auth.service import find_key_by_secret
+from app.db.models import ApiKey
+from app.db.session import get_session
+
+# last_used_at is a convenience for humans, so it is refreshed at most this often per key
+# rather than costing a database write on every request.
+LAST_USED_REFRESH = timedelta(minutes=1)
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    """Who is calling. Holds no secret, so it is safe to log and pass around."""
+
+    key_id: str
+    key_prefix: str
+    tenant_id: str
+    tenant_name: str
+
+
+def _bearer_token(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    token = token.strip()
+    if scheme.lower() != "bearer" or not token:
+        raise MissingApiKeyError
+    return token
+
+
+async def _touch(session: AsyncSession, key: ApiKey) -> None:
+    now = datetime.now(UTC)
+    if key.last_used_at is not None and now - key.last_used_at < LAST_USED_REFRESH:
+        return
+    await session.execute(update(ApiKey).where(ApiKey.id == key.id).values(last_used_at=now))
+    await session.commit()
+
+
+async def authenticate(
+    request: Request, session: Annotated[AsyncSession, Depends(get_session)]
+) -> AuthContext:
+    key = await find_key_by_secret(session, _bearer_token(request))
+    if key is None:
+        raise InvalidApiKeyError
+    if not key.tenant.is_active:
+        raise TenantDeactivatedError
+
+    await _touch(session, key)
+    context = AuthContext(
+        key_id=key.id,
+        key_prefix=key.key_prefix,
+        tenant_id=key.tenant_id,
+        tenant_name=key.tenant.name,
+    )
+    request.state.auth = context  # lets the access log say who made the call
+    return context

@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.auth.errors import AuthError
 from app.providers.errors import (
     AuthFailed,
     BadRequest,
@@ -91,6 +92,13 @@ async def _unknown_model_handler(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def _auth_error_handler(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, AuthError)
+    return error_response(
+        exc.status_code, exc.message, type=exc.type, code=exc.code, headers=dict(exc.headers)
+    )
+
+
 async def _context_length_handler(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ContextLengthExceededError)
     return error_response(
@@ -125,6 +133,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(StarletteHTTPException, _http_exception_handler)
     app.add_exception_handler(RequestValidationError, _validation_exception_handler)
     app.add_exception_handler(ProviderError, _provider_error_handler)
+    app.add_exception_handler(AuthError, _auth_error_handler)
     app.add_exception_handler(UnknownModelError, _unknown_model_handler)
     app.add_exception_handler(ContextLengthExceededError, _context_length_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)

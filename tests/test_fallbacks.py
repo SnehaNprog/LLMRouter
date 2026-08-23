@@ -5,7 +5,6 @@ from typing import Any
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.core.model_config import ConfigError, load_config, parse_config
@@ -18,7 +17,7 @@ from app.router.retry import RetryPolicy
 from app.router.router import Router
 from app.schemas.chat import ChatCompletionRequest, Message
 from app.schemas.completion import ChatCompletionChunk
-from tests.conftest import model_config
+from tests.conftest import AuthedClient, model_config
 
 # ---------- config ----------
 
@@ -312,7 +311,7 @@ def test_dead_primary_is_served_by_the_fallback_over_http() -> None:
         )
 
     settings = Settings(_env_file=None, retry_base_delay=0.0, retry_max_attempts=2)
-    with TestClient(create_app(settings, factory)) as client:
+    with AuthedClient(create_app(settings, factory)) as client:
         response = client.post(
             "/v1/chat/completions",
             json={"model": "primary", "messages": [{"role": "user", "content": "hi"}]},

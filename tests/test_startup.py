@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.core.config import Settings, provider_environment
 from app.core.model_config import ConfigError
 from app.main import create_app
+from tests.conftest import AuthedClient
 
 GOOD_YAML = """\
 models:
@@ -38,7 +39,7 @@ def test_valid_config_loads_and_serves_models(
     config.write_text(GOOD_YAML)
     monkeypatch.setenv("STARTUP_TEST_KEY", "secret")
 
-    with TestClient(app_for(config)) as client:
+    with AuthedClient(app_for(config)) as client:
         ids = [m["id"] for m in client.get("/v1/models").json()["data"]]
 
     assert ids == ["fast", "local"]

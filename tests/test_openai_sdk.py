@@ -1,12 +1,13 @@
 import pytest
-from fastapi.testclient import TestClient
 from openai import BadRequestError, OpenAI
+
+from tests.conftest import AuthedClient
 
 
 @pytest.fixture
-def sdk(client: TestClient) -> OpenAI:
+def sdk(client: AuthedClient) -> OpenAI:
     # TestClient is an httpx.Client, so the SDK talks to the app in-process.
-    return OpenAI(base_url="http://testserver/v1", api_key="test-key", http_client=client)
+    return OpenAI(base_url="http://testserver/v1", api_key=client.secret, http_client=client)
 
 
 def test_chat_completion(sdk: OpenAI) -> None:
