@@ -6,7 +6,13 @@ from fastapi import Depends, Request
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.errors import InvalidApiKeyError, MissingApiKeyError, TenantDeactivatedError
+from app.auth.errors import (
+    ApiKeyExpiredError,
+    ApiKeyRevokedError,
+    InvalidApiKeyError,
+    MissingApiKeyError,
+    TenantDeactivatedError,
+)
 from app.auth.service import find_key_by_secret
 from app.db.models import ApiKey
 from app.db.session import get_session
@@ -49,6 +55,12 @@ async def authenticate(
     key = await find_key_by_secret(session, _bearer_token(request))
     if key is None:
         raise InvalidApiKeyError
+    # Checked on every request, so a revocation takes effect immediately.
+    status = key.status()
+    if status == "revoked":
+        raise ApiKeyRevokedError
+    if status == "expired":
+        raise ApiKeyExpiredError
     if not key.tenant.is_active:
         raise TenantDeactivatedError
 

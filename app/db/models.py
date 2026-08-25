@@ -1,5 +1,6 @@
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlalchemy import ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -42,5 +43,16 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String(64), unique=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 
     tenant: Mapped[Tenant] = relationship(back_populates="api_keys")
+
+    def status(self, now: datetime | None = None) -> Literal["active", "expired", "revoked"]:
+        """Revocation wins over expiry; a key is expired from its expiry instant onwards."""
+        now = now or utcnow()
+        if self.revoked_at is not None:
+            return "revoked"
+        if self.expires_at is not None and now >= self.expires_at:
+            return "expired"
+        return "active"

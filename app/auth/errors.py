@@ -37,3 +37,17 @@ class TenantDeactivatedError(AuthError):
 
     def __init__(self) -> None:
         super().__init__("This organisation has been deactivated.")
+
+
+class ApiKeyRevokedError(AuthError):
+    code = "api_key_revoked"
+
+    def __init__(self) -> None:
+        super().__init__("This API key has been revoked.")
+
+
+class ApiKeyExpiredError(AuthError):
+    code = "api_key_expired"
+
+    def __init__(self) -> None:
+        super().__init__("This API key has expired.")
