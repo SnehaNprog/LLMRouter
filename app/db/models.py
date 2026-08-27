@@ -1,10 +1,12 @@
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import JSON, ForeignKey, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from app.auth.scopes import DEFAULT_SCOPES
 from app.db.base import Base, UTCDateTime
 
 
@@ -43,6 +45,12 @@ class ApiKey(Base):
     key_hash: Mapped[str] = mapped_column(String(64), unique=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
+    # What the key may do (see app/auth/scopes.py). Existing rows get the defaults.
+    scopes: Mapped[list[str]] = mapped_column(
+        JSON,
+        default=lambda: list(DEFAULT_SCOPES),
+        server_default=text(f"'{json.dumps(list(DEFAULT_SCOPES))}'"),
+    )
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 

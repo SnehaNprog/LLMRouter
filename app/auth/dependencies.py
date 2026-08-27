@@ -30,6 +30,7 @@ class AuthContext:
     key_prefix: str
     tenant_id: str
     tenant_name: str
+    scopes: frozenset[str]
 
 
 def _bearer_token(request: Request) -> str:
@@ -70,6 +71,7 @@ async def authenticate(
         key_prefix=key.key_prefix,
         tenant_id=key.tenant_id,
         tenant_name=key.tenant.name,
+        scopes=frozenset(key.scopes),
     )
     request.state.auth = context  # lets the access log say who made the call
     return context

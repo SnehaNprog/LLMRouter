@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -5,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.auth.keys import generate_key, hash_key, looks_like_key
+from app.auth.scopes import DEFAULT_SCOPES, normalize_scopes
 from app.db.models import ApiKey, Tenant, utcnow
 
 
@@ -45,13 +47,19 @@ def _check_expiry(expires_at: datetime | None) -> None:
 
 
 async def create_api_key(
-    session: AsyncSession, tenant_id: str, name: str, expires_at: datetime | None = None
+    session: AsyncSession,
+    tenant_id: str,
+    name: str,
+    expires_at: datetime | None = None,
+    scopes: Sequence[str] | None = None,
 ) -> tuple[ApiKey, str]:
     """Create a key for a tenant. Returns the record and the plaintext secret.
 
-    The secret exists only in this return value; the database keeps its hash.
+    The secret exists only in this return value; the database keeps its hash. Without
+    ``scopes`` the key gets the least-privilege defaults (chat and model listing).
     """
     _check_expiry(expires_at)
+    granted = normalize_scopes(DEFAULT_SCOPES if scopes is None else scopes)
     name = name.strip()
     if not name:
         raise ValueError("a key needs a name")
@@ -71,6 +79,7 @@ async def create_api_key(
         key_prefix=generated.prefix,
         key_hash=generated.hash,
         expires_at=expires_at,
+        scopes=granted,
     )
     session.add(key)
     await session.commit()
@@ -110,12 +119,14 @@ async def rotate_api_key(
     *,
     grace: timedelta = timedelta(0),
     expires_at: datetime | None = None,
+    scopes: Sequence[str] | None = None,
 ) -> tuple[ApiKey, str]:
     """Replace a key with a fresh one under the same name.
 
     The old key is revoked straight away, or, with ``grace``, keeps working for that long so
     clients can switch over (a grace period never lengthens an earlier expiry). The new key
-    does not inherit the old key's expiry; pass ``expires_at`` to give it one.
+    keeps the old key's scopes unless ``scopes`` says otherwise, but does not inherit its
+    expiry; pass ``expires_at`` to give it one.
     """
     if grace < timedelta(0):
         raise ValueError("grace must not be negative")
@@ -124,7 +135,9 @@ async def rotate_api_key(
     if status != "active":
         raise KeyInactiveError(key_id, status)
 
-    new_key, secret = await create_api_key(session, tenant_id, old.name, expires_at)
+    new_key, secret = await create_api_key(
+        session, tenant_id, old.name, expires_at, list(old.scopes) if scopes is None else scopes
+    )
     if grace == timedelta(0):
         old.revoked_at = utcnow()
     else:
