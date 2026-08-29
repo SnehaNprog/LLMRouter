@@ -6,6 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from sqlalchemy import select
 
 from app.auth.service import create_api_key
 from app.core.config import Settings
@@ -76,6 +77,22 @@ class AuthedClient(TestClient):
         self.secret = self.portal.call(seed_credentials, self.app)
         self.headers["Authorization"] = f"Bearer {self.secret}"
         return self
+
+    def issue_key(self, scopes: list[str] | None = None) -> str:
+        """Create another key for the same tenant; return its secret."""
+
+        async def create() -> str:
+            async with self.app.state.db_session_factory() as session:  # type: ignore[attr-defined]
+                tenant = (await session.execute(select(Tenant))).scalars().first()
+                assert tenant is not None
+                _, secret = await create_api_key(session, tenant.id, "extra key", scopes=scopes)
+                return str(secret)
+
+        assert self.portal is not None
+        return str(self.portal.call(create))
+
+    def as_key(self, secret: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {secret}"}
 
 
 @pytest.fixture

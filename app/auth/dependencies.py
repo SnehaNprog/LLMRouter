@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -9,10 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.errors import (
     ApiKeyExpiredError,
     ApiKeyRevokedError,
+    InsufficientScopeError,
     InvalidApiKeyError,
     MissingApiKeyError,
     TenantDeactivatedError,
 )
+from app.auth.scopes import KNOWN_SCOPES, scope_allows
 from app.auth.service import find_key_by_secret
 from app.db.models import ApiKey
 from app.db.session import get_session
@@ -75,3 +78,19 @@ async def authenticate(
     )
     request.state.auth = context  # lets the access log say who made the call
     return context
+
+
+def require_scope(scope: str) -> Callable[..., Awaitable[AuthContext]]:
+    """A dependency that authenticates the caller, then demands that their key holds ``scope``.
+
+    Authentication failures stay 401; a valid key without the scope is a 403.
+    """
+    if scope not in KNOWN_SCOPES:
+        raise ValueError(f"'{scope}' is not a known scope")  # fail at import, not at request time
+
+    async def dependency(auth: Annotated[AuthContext, Depends(authenticate)]) -> AuthContext:
+        if not scope_allows(auth.scopes, scope):
+            raise InsufficientScopeError(scope)
+        return auth
+
+    return dependency

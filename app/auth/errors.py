@@ -51,3 +51,15 @@ class ApiKeyExpiredError(AuthError):
 
     def __init__(self) -> None:
         super().__init__("This API key has expired.")
+
+
+class InsufficientScopeError(AuthError):
+    status_code = 403
+    type = "permission_error"
+    code = "insufficient_scope"
+
+    def __init__(self, scope: str) -> None:
+        super().__init__(f"This API key does not have the required scope '{scope}'.")
+        self.scope = scope
+        # RFC 6750: tell the client which scope would have been needed.
+        self.headers = {"WWW-Authenticate": f'Bearer error="insufficient_scope", scope="{scope}"'}
