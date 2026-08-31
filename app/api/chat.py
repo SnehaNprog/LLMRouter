@@ -7,7 +7,9 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.api.deps import get_router
 from app.api.errors import describe_provider_error
-from app.auth.dependencies import require_scope
+from app.auth.dependencies import AuthContext, require_scope
+from app.auth.errors import ModelNotAllowedError
+from app.auth.model_access import model_allowed
 from app.auth.scopes import CHAT_WRITE
 from app.providers.errors import ProviderError
 from app.router.router import Router
@@ -17,7 +19,7 @@ from app.schemas.error import ErrorResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1", dependencies=[Depends(require_scope(CHAT_WRITE))])
+router = APIRouter(prefix="/v1")
 
 
 def _sse(payload: str) -> str:
@@ -49,8 +51,14 @@ async def _event_stream(
     "/chat/completions", response_model=ChatCompletionResponse, response_model_exclude_none=True
 )
 async def create_chat_completion(
-    request: ChatCompletionRequest, gateway: Annotated[Router, Depends(get_router)]
+    request: ChatCompletionRequest,
+    gateway: Annotated[Router, Depends(get_router)],
+    auth: Annotated[AuthContext, Depends(require_scope(CHAT_WRITE))],
 ) -> Response:
+    # Checked before the model is looked up, so a key learns nothing about models it may not use.
+    if not model_allowed(auth.allowed_models, request.model):
+        raise ModelNotAllowedError(request.model)
+
     if not request.stream:
         completion = await gateway.complete(request)
         return JSONResponse(completion.model_dump(exclude_none=True))

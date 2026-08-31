@@ -4,6 +4,7 @@ class AuthError(Exception):
     status_code = 401
     type = "authentication_error"
     code = "invalid_api_key"
+    param: str | None = None
     headers: dict[str, str] = {"WWW-Authenticate": "Bearer"}
 
     def __init__(self, message: str) -> None:
@@ -63,3 +64,15 @@ class InsufficientScopeError(AuthError):
         self.scope = scope
         # RFC 6750: tell the client which scope would have been needed.
         self.headers = {"WWW-Authenticate": f'Bearer error="insufficient_scope", scope="{scope}"'}
+
+
+class ModelNotAllowedError(AuthError):
+    status_code = 403
+    type = "permission_error"
+    code = "model_not_allowed"
+    param = "model"
+    headers: dict[str, str] = {}
+
+    def __init__(self, model: str) -> None:
+        super().__init__(f"This API key is not allowed to use the model '{model}'.")
+        self.model = model

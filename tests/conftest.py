@@ -78,14 +78,18 @@ class AuthedClient(TestClient):
         self.headers["Authorization"] = f"Bearer {self.secret}"
         return self
 
-    def issue_key(self, scopes: list[str] | None = None) -> str:
+    def issue_key(
+        self, scopes: list[str] | None = None, allowed_models: list[str] | None = None
+    ) -> str:
         """Create another key for the same tenant; return its secret."""
 
         async def create() -> str:
             async with self.app.state.db_session_factory() as session:  # type: ignore[attr-defined]
                 tenant = (await session.execute(select(Tenant))).scalars().first()
                 assert tenant is not None
-                _, secret = await create_api_key(session, tenant.id, "extra key", scopes=scopes)
+                _, secret = await create_api_key(
+                    session, tenant.id, "extra key", scopes=scopes, allowed_models=allowed_models
+                )
                 return str(secret)
 
         assert self.portal is not None

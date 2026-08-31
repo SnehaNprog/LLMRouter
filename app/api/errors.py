@@ -95,7 +95,12 @@ async def _unknown_model_handler(_: Request, exc: Exception) -> JSONResponse:
 async def _auth_error_handler(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, AuthError)
     return error_response(
-        exc.status_code, exc.message, type=exc.type, code=exc.code, headers=dict(exc.headers)
+        exc.status_code,
+        exc.message,
+        type=exc.type,
+        param=exc.param,
+        code=exc.code,
+        headers=dict(exc.headers),
     )
 
 

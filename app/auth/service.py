@@ -1,11 +1,13 @@
 from collections.abc import Sequence
 from datetime import datetime, timedelta
+from enum import Enum
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.auth.keys import generate_key, hash_key, looks_like_key
+from app.auth.model_access import normalize_allowed_models
 from app.auth.scopes import DEFAULT_SCOPES, normalize_scopes
 from app.db.models import ApiKey, Tenant, utcnow
 
@@ -20,6 +22,13 @@ class TenantInactiveError(Exception):
     def __init__(self, tenant_id: str) -> None:
         super().__init__(f"tenant '{tenant_id}' is deactivated")
         self.tenant_id = tenant_id
+
+
+class _Inherit(Enum):
+    INHERIT = 0
+
+
+INHERIT = _Inherit.INHERIT  # "keep the old key's setting", as opposed to None ("no restriction")
 
 
 class KeyNotFoundError(Exception):
@@ -52,14 +61,17 @@ async def create_api_key(
     name: str,
     expires_at: datetime | None = None,
     scopes: Sequence[str] | None = None,
+    allowed_models: Sequence[str] | None = None,
 ) -> tuple[ApiKey, str]:
     """Create a key for a tenant. Returns the record and the plaintext secret.
 
     The secret exists only in this return value; the database keeps its hash. Without
-    ``scopes`` the key gets the least-privilege defaults (chat and model listing).
+    ``scopes`` the key gets the least-privilege defaults (chat and model listing); without
+    ``allowed_models`` it may use every model.
     """
     _check_expiry(expires_at)
     granted = normalize_scopes(DEFAULT_SCOPES if scopes is None else scopes)
+    models = None if allowed_models is None else normalize_allowed_models(allowed_models)
     name = name.strip()
     if not name:
         raise ValueError("a key needs a name")
@@ -80,6 +92,7 @@ async def create_api_key(
         key_hash=generated.hash,
         expires_at=expires_at,
         scopes=granted,
+        allowed_models=models,
     )
     session.add(key)
     await session.commit()
@@ -120,13 +133,15 @@ async def rotate_api_key(
     grace: timedelta = timedelta(0),
     expires_at: datetime | None = None,
     scopes: Sequence[str] | None = None,
+    allowed_models: Sequence[str] | None | _Inherit = INHERIT,
 ) -> tuple[ApiKey, str]:
     """Replace a key with a fresh one under the same name.
 
     The old key is revoked straight away, or, with ``grace``, keeps working for that long so
     clients can switch over (a grace period never lengthens an earlier expiry). The new key
-    keeps the old key's scopes unless ``scopes`` says otherwise, but does not inherit its
-    expiry; pass ``expires_at`` to give it one.
+    keeps the old key's scopes and model allow-list unless told otherwise (pass
+    ``allowed_models=None`` to lift the restriction), but does not inherit its expiry; pass
+    ``expires_at`` to give it one.
     """
     if grace < timedelta(0):
         raise ValueError("grace must not be negative")
@@ -135,8 +150,14 @@ async def rotate_api_key(
     if status != "active":
         raise KeyInactiveError(key_id, status)
 
+    models = old.allowed_models if isinstance(allowed_models, _Inherit) else allowed_models
     new_key, secret = await create_api_key(
-        session, tenant_id, old.name, expires_at, list(old.scopes) if scopes is None else scopes
+        session,
+        tenant_id,
+        old.name,
+        expires_at,
+        list(old.scopes) if scopes is None else scopes,
+        None if models is None else list(models),
     )
     if grace == timedelta(0):
         old.revoked_at = utcnow()

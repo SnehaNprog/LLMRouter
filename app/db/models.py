@@ -51,6 +51,8 @@ class ApiKey(Base):
         default=lambda: list(DEFAULT_SCOPES),
         server_default=text(f"'{json.dumps(list(DEFAULT_SCOPES))}'"),
     )
+    # Model aliases (or "fast*" style patterns) the key may use; NULL means every model.
+    allowed_models: Mapped[list[str] | None] = mapped_column(JSON(none_as_null=True), default=None)
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 
