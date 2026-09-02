@@ -166,3 +166,22 @@ async def rotate_api_key(
         old.expires_at = cutoff if old.expires_at is None else min(old.expires_at, cutoff)
     await session.commit()
     return new_key, secret
+
+
+async def get_api_key(session: AsyncSession, tenant_id: str, key_id: str) -> ApiKey:
+    return await _tenant_key(session, tenant_id, key_id)
+
+
+async def list_api_keys(
+    session: AsyncSession, tenant_id: str, *, limit: int = 50, offset: int = 0
+) -> list[ApiKey]:
+    if await session.get(Tenant, tenant_id) is None:
+        raise TenantNotFoundError(tenant_id)
+    result = await session.execute(
+        select(ApiKey)
+        .where(ApiKey.tenant_id == tenant_id)
+        .order_by(ApiKey.created_at, ApiKey.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    return list(result.scalars())

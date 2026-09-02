@@ -38,3 +38,19 @@ def scope_allows(granted: Collection[str], required: str) -> bool:
         raise ValueError(f"'{required}' is not a known scope")  # a typo in our own code
     resource = required.split(":")[0]
     return required in granted or f"{resource}:*" in granted
+
+
+def can_grant(holder_scopes: Collection[str], requested: str) -> bool:
+    """Whether a key holding ``holder_scopes`` may hand ``requested`` to a key it creates.
+
+    Ordinary scopes (chat, models) can be granted by any administrator, since administrators
+    exist to hand out access. Admin scopes only travel downwards: you must hold the scope
+    yourself (a wildcard such as ``admin:*`` counts, but granting the wildcard itself needs
+    the wildcard). This stops a narrow admin key from minting a broader one.
+    """
+    resource, _, action = requested.partition(":")
+    if resource != "admin":
+        return True
+    if action == "*":
+        return requested in holder_scopes
+    return scope_allows(holder_scopes, requested)

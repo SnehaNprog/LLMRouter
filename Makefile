@@ -1,4 +1,4 @@
-.PHONY: install dev migrate migration test lint fmt typecheck check
+.PHONY: install dev migrate migration admin-key test lint fmt typecheck check
 
 install:
 	pip install -e ".[dev]"
@@ -8,6 +8,10 @@ dev:
 
 migrate:
 	alembic upgrade head
+
+# prints a new admin API key once; run `make migrate` first
+admin-key:
+	python -m app.cli create-admin
 
 # usage: make migration m="add something"
 migration:

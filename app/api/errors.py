@@ -7,6 +7,13 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.auth.errors import AuthError
+from app.auth.service import (
+    KeyInactiveError,
+    KeyNotFoundError,
+    TenantInactiveError,
+    TenantNotFoundError,
+)
+from app.auth.tenants import AdminConflictError
 from app.providers.errors import (
     AuthFailed,
     BadRequest,
@@ -104,6 +111,22 @@ async def _auth_error_handler(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def _not_found_handler(_: Request, exc: Exception) -> JSONResponse:
+    if isinstance(exc, TenantNotFoundError):
+        return error_response(404, str(exc), param="tenant_id", code="tenant_not_found")
+    assert isinstance(exc, KeyNotFoundError)
+    return error_response(404, str(exc), param="key_id", code="key_not_found")
+
+
+async def _conflict_handler(_: Request, exc: Exception) -> JSONResponse:
+    if isinstance(exc, AdminConflictError):
+        return error_response(409, exc.message, type="invalid_request_error", code=exc.code)
+    if isinstance(exc, TenantInactiveError):
+        return error_response(409, str(exc), type="invalid_request_error", code="tenant_inactive")
+    assert isinstance(exc, KeyInactiveError)
+    return error_response(409, str(exc), type="invalid_request_error", code="key_inactive")
+
+
 async def _context_length_handler(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ContextLengthExceededError)
     return error_response(
@@ -139,6 +162,10 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RequestValidationError, _validation_exception_handler)
     app.add_exception_handler(ProviderError, _provider_error_handler)
     app.add_exception_handler(AuthError, _auth_error_handler)
+    for not_found in (TenantNotFoundError, KeyNotFoundError):
+        app.add_exception_handler(not_found, _not_found_handler)
+    for conflict in (AdminConflictError, TenantInactiveError, KeyInactiveError):
+        app.add_exception_handler(conflict, _conflict_handler)
     app.add_exception_handler(UnknownModelError, _unknown_model_handler)
     app.add_exception_handler(ContextLengthExceededError, _context_length_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)

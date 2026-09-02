@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 
+from app.api.admin import keys as admin_keys_router
+from app.api.admin import tenants as admin_tenants_router
 from app.api.chat import router as chat_router
 from app.api.errors import register_exception_handlers
 from app.api.health import default_readiness_checks
@@ -25,6 +27,8 @@ def create_app(
     app.include_router(health_router)
     app.include_router(chat_router)
     app.include_router(models_router)
+    app.include_router(admin_tenants_router)
+    app.include_router(admin_keys_router)
     return app
 
 

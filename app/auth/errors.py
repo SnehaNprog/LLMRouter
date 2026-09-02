@@ -76,3 +76,14 @@ class ModelNotAllowedError(AuthError):
     def __init__(self, model: str) -> None:
         super().__init__(f"This API key is not allowed to use the model '{model}'.")
         self.model = model
+
+
+class ScopeEscalationError(AuthError):
+    status_code = 403
+    type = "permission_error"
+    code = "scope_escalation"
+    headers: dict[str, str] = {}
+
+    def __init__(self, scope: str) -> None:
+        super().__init__(f"Your key cannot grant the scope '{scope}' because it does not hold it.")
+        self.scope = scope
