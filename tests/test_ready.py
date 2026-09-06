@@ -8,7 +8,7 @@ def test_ready_reports_checks(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ready",
-        "checks": {"config": "ok", "database": "ok"},
+        "checks": {"config": "ok", "database": "ok", "redis": "ok"},
     }
 
 

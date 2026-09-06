@@ -1,16 +1,20 @@
-from collections.abc import Iterator
+import os
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
+import fakeredis
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from redis.asyncio import Redis
 from sqlalchemy import select
 
 from app.auth.service import create_api_key
 from app.core.config import Settings
 from app.core.model_config import ModelConfig
+from app.core.redis import build_redis_client
 from app.db.base import Base
 from app.db.models import Tenant
 from app.main import create_app
@@ -50,6 +54,15 @@ def registry_with(provider: Provider, **config_overrides: Any) -> ModelRegistry:
 def in_memory_database(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every app built in a test gets its own throwaway database, never ./llmrouter.db."""
     monkeypatch.setenv("LLMROUTER_DATABASE_URL", TEST_DATABASE_URL)
+
+
+@pytest.fixture(autouse=True)
+def fake_redis_for_apps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Apps built in tests get a private in-memory Redis, never a real server."""
+    monkeypatch.setattr(
+        "app.lifespan.build_redis_client",
+        lambda settings: fakeredis.FakeAsyncRedis(decode_responses=True),
+    )
 
 
 async def seed_credentials(
@@ -119,3 +132,26 @@ def app_(provider: FakeProvider) -> FastAPI:
 def client(app_: FastAPI) -> Iterator[AuthedClient]:
     with AuthedClient(app_) as test_client:
         yield test_client
+
+
+@pytest.fixture(params=["fake", "real"])
+async def redis_client(request: pytest.FixtureRequest) -> AsyncIterator[Redis]:
+    """The same Redis tests, run against an in-memory fake and (opt-in) a real server.
+
+    The real server is used only when LLMROUTER_TEST_REDIS_URL is set, because the tests flush
+    the database it points at: use a database you do not care about (`make test-redis`).
+    """
+    client: Redis
+    if request.param == "fake":
+        client = fakeredis.FakeAsyncRedis(decode_responses=True)
+    else:
+        url = os.environ.get("LLMROUTER_TEST_REDIS_URL")
+        if not url:
+            pytest.skip("set LLMROUTER_TEST_REDIS_URL to also test against a real Redis")
+        client = build_redis_client(Settings(_env_file=None, redis_url=url))  # as in production
+        await client.ping()  # opted in, so an unreachable server is a failure, not a skip
+        await client.flushdb()
+    yield client
+    if request.param == "real":
+        await client.flushdb()
+    await client.aclose()

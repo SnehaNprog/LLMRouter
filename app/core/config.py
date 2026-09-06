@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     config_path: Path = Path("config.yaml")
     database_url: str = "sqlite+aiosqlite:///./llmrouter.db"
+    redis_url: str = "redis://localhost:6379/0"
+    redis_timeout: float = (
+        1.0  # seconds: connecting, each command, and waiting for a free connection
+    )
+    redis_max_connections: int = 50
     http_connect_timeout: float = 5.0
     http_read_timeout: float = 60.0
     http_write_timeout: float = 10.0

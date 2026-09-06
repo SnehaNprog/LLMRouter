@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.core.config import Settings, provider_environment
 from app.core.http import build_http_client
 from app.core.model_config import ConfigError, load_config
+from app.core.redis import build_redis_client, redis_ready
 from app.db.session import create_engine, create_session_factory, database_ready
 from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry, build_registry
@@ -40,6 +41,9 @@ def make_lifespan(
         app.state.db_engine = engine
         app.state.db_session_factory = create_session_factory(engine)
         app.state.readiness_checks["database"] = partial(database_ready, engine)
+        redis = build_redis_client(settings)  # lazy: Redis being down never blocks startup
+        app.state.redis = redis
+        app.state.readiness_checks["redis"] = partial(redis_ready, redis)
         try:
             try:
                 registry = registry_factory(client)
@@ -63,6 +67,7 @@ def make_lifespan(
             yield
         finally:
             await client.aclose()
+            await redis.aclose()
             await engine.dispose()
 
     return lifespan
