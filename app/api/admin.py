@@ -141,6 +141,7 @@ async def create_key_endpoint(
             expires_at=body.expires_at,
             scopes=body.scopes,
             allowed_models=body.allowed_models,
+            rpm_limit=body.rpm_limit,
         )
     except ValueError as exc:
         raise _bad_request(exc) from None
@@ -188,6 +189,7 @@ async def rotate_key_endpoint(
     old = await get_api_key(session, tenant_id, key_id)
     _check_grantable(auth, body.scopes if body.scopes is not None else list(old.scopes))
     keep_models = "allowed_models" not in body.model_fields_set
+    keep_rpm = "rpm_limit" not in body.model_fields_set
     try:
         key, secret = await rotate_api_key(
             session,
@@ -197,6 +199,7 @@ async def rotate_key_endpoint(
             expires_at=body.expires_at,
             scopes=body.scopes,
             allowed_models=INHERIT if keep_models else body.allowed_models,
+            rpm_limit=INHERIT if keep_rpm else body.rpm_limit,
         )
     except ValueError as exc:
         raise _bad_request(exc) from None

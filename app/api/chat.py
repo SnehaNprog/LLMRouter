@@ -5,19 +5,32 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from app.api.deps import get_router
+from app.api.deps import get_limiter, get_router
 from app.api.errors import describe_provider_error
 from app.auth.dependencies import AuthContext, require_scope
 from app.auth.errors import ModelNotAllowedError
 from app.auth.model_access import model_allowed
 from app.auth.scopes import CHAT_WRITE
 from app.providers.errors import ProviderError
+from app.quota.limiter import RateLimiter
 from app.router.router import Router
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse
 from app.schemas.error import ErrorResponse
 
 logger = logging.getLogger(__name__)
+
+chat_scope = require_scope(CHAT_WRITE)
+
+
+async def rate_limited_chat(
+    auth: Annotated[AuthContext, Depends(chat_scope)],
+    limiter: Annotated[RateLimiter, Depends(get_limiter)],
+) -> AuthContext:
+    """Authenticate, check the scope, then count the request against the key's rate limit."""
+    await limiter.check_request(auth)
+    return auth
+
 
 router = APIRouter(prefix="/v1")
 
@@ -53,7 +66,7 @@ async def _event_stream(
 async def create_chat_completion(
     request: ChatCompletionRequest,
     gateway: Annotated[Router, Depends(get_router)],
-    auth: Annotated[AuthContext, Depends(require_scope(CHAT_WRITE))],
+    auth: Annotated[AuthContext, Depends(rate_limited_chat)],
 ) -> Response:
     # Checked before the model is looked up, so a key learns nothing about models it may not use.
     if not model_allowed(auth.allowed_models, request.model):

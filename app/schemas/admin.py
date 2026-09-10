@@ -44,6 +44,7 @@ class KeyCreate(_Request):
     name: str = Field(min_length=1, max_length=200)
     scopes: list[str] | None = None  # default: chat and model listing
     allowed_models: list[str] | None = None  # default: every model
+    rpm_limit: int | None = Field(default=None, ge=1, le=1_000_000)  # default: gateway default
     expires_at: datetime | None = None
 
 
@@ -52,6 +53,7 @@ class KeyRotate(_Request):
     expires_at: datetime | None = None
     scopes: list[str] | None = None  # default: keep the old key's scopes
     allowed_models: list[str] | None = None  # omit to keep; null lifts the restriction
+    rpm_limit: int | None = Field(default=None, ge=1, le=1_000_000)  # omit to keep; null: default
 
 
 class KeyOut(BaseModel):
@@ -61,6 +63,7 @@ class KeyOut(BaseModel):
     key_prefix: str
     scopes: list[str]
     allowed_models: list[str] | None
+    rpm_limit: int | None
     status: Literal["active", "expired", "revoked"]
     created_at: datetime
     last_used_at: datetime | None
@@ -76,6 +79,7 @@ class KeyOut(BaseModel):
             key_prefix=key.key_prefix,
             scopes=list(key.scopes),
             allowed_models=None if key.allowed_models is None else list(key.allowed_models),
+            rpm_limit=key.rpm_limit,
             status=key.status(),
             created_at=key.created_at,
             last_used_at=key.last_used_at,

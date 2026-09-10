@@ -92,7 +92,10 @@ class AuthedClient(TestClient):
         return self
 
     def issue_key(
-        self, scopes: list[str] | None = None, allowed_models: list[str] | None = None
+        self,
+        scopes: list[str] | None = None,
+        allowed_models: list[str] | None = None,
+        rpm_limit: int | None = None,
     ) -> str:
         """Create another key for the same tenant; return its secret."""
 
@@ -101,7 +104,12 @@ class AuthedClient(TestClient):
                 tenant = (await session.execute(select(Tenant))).scalars().first()
                 assert tenant is not None
                 _, secret = await create_api_key(
-                    session, tenant.id, "extra key", scopes=scopes, allowed_models=allowed_models
+                    session,
+                    tenant.id,
+                    "extra key",
+                    scopes=scopes,
+                    allowed_models=allowed_models,
+                    rpm_limit=rpm_limit,
                 )
                 return str(secret)
 

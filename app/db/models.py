@@ -53,6 +53,8 @@ class ApiKey(Base):
     )
     # Model aliases (or "fast*" style patterns) the key may use; NULL means every model.
     allowed_models: Mapped[list[str] | None] = mapped_column(JSON(none_as_null=True), default=None)
+    # Requests per minute this key may make; NULL falls back to the gateway-wide default.
+    rpm_limit: Mapped[int | None] = mapped_column(default=None)
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 

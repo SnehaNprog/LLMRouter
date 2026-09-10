@@ -20,6 +20,10 @@ class Settings(BaseSettings):
         1.0  # seconds: connecting, each command, and waiting for a free connection
     )
     redis_max_connections: int = 50
+    redis_key_prefix: str = "llmrouter:"
+    default_rpm_limit: int | None = (
+        None  # requests per minute for keys without their own; None: unlimited
+    )
     http_connect_timeout: float = 5.0
     http_read_timeout: float = 60.0
     http_write_timeout: float = 10.0
