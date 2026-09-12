@@ -47,11 +47,17 @@ class KeyInactiveError(Exception):
 
 
 MAX_RPM_LIMIT = 1_000_000
+MAX_TPM_LIMIT = 1_000_000_000
 
 
 def _check_rpm_limit(rpm_limit: int | None) -> None:
     if rpm_limit is not None and not 1 <= rpm_limit <= MAX_RPM_LIMIT:
         raise ValueError(f"rpm_limit must be between 1 and {MAX_RPM_LIMIT}")
+
+
+def _check_tpm_limit(tpm_limit: int | None) -> None:
+    if tpm_limit is not None and not 1 <= tpm_limit <= MAX_TPM_LIMIT:
+        raise ValueError(f"tpm_limit must be between 1 and {MAX_TPM_LIMIT}")
 
 
 def _check_expiry(expires_at: datetime | None) -> None:
@@ -71,16 +77,18 @@ async def create_api_key(
     scopes: Sequence[str] | None = None,
     allowed_models: Sequence[str] | None = None,
     rpm_limit: int | None = None,
+    tpm_limit: int | None = None,
 ) -> tuple[ApiKey, str]:
     """Create a key for a tenant. Returns the record and the plaintext secret.
 
     The secret exists only in this return value; the database keeps its hash. Without
     ``scopes`` the key gets the least-privilege defaults (chat and model listing); without
     ``allowed_models`` it may use every model, and without ``rpm_limit`` it gets the gateway's
-    default request rate.
+    default request rate (and likewise ``tpm_limit`` for tokens).
     """
     _check_expiry(expires_at)
     _check_rpm_limit(rpm_limit)
+    _check_tpm_limit(tpm_limit)
     granted = normalize_scopes(DEFAULT_SCOPES if scopes is None else scopes)
     models = None if allowed_models is None else normalize_allowed_models(allowed_models)
     name = name.strip()
@@ -105,6 +113,7 @@ async def create_api_key(
         scopes=granted,
         allowed_models=models,
         rpm_limit=rpm_limit,
+        tpm_limit=tpm_limit,
     )
     session.add(key)
     await session.commit()
@@ -147,14 +156,15 @@ async def rotate_api_key(
     scopes: Sequence[str] | None = None,
     allowed_models: Sequence[str] | None | _Inherit = INHERIT,
     rpm_limit: int | None | _Inherit = INHERIT,
+    tpm_limit: int | None | _Inherit = INHERIT,
 ) -> tuple[ApiKey, str]:
     """Replace a key with a fresh one under the same name.
 
     The old key is revoked straight away, or, with ``grace``, keeps working for that long so
     clients can switch over (a grace period never lengthens an earlier expiry). The new key
-    keeps the old key's scopes, model allow-list and rate limit unless told otherwise (pass
-    ``allowed_models=None`` or ``rpm_limit=None`` to lift the restriction), but does not
-    inherit its expiry; pass ``expires_at`` to give it one.
+    keeps the old key's scopes, model allow-list and rate limits unless told otherwise (pass
+    ``None`` for ``allowed_models``, ``rpm_limit`` or ``tpm_limit`` to lift the restriction),
+    but does not inherit its expiry; pass ``expires_at`` to give it one.
     """
     if grace < timedelta(0):
         raise ValueError("grace must not be negative")
@@ -172,6 +182,7 @@ async def rotate_api_key(
         list(old.scopes) if scopes is None else scopes,
         None if models is None else list(models),
         old.rpm_limit if isinstance(rpm_limit, _Inherit) else rpm_limit,
+        old.tpm_limit if isinstance(tpm_limit, _Inherit) else tpm_limit,
     )
     if grace == timedelta(0):
         old.revoked_at = utcnow()

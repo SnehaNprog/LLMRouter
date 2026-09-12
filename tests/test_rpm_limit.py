@@ -35,6 +35,7 @@ def auth(key_id: str = "key-1", rpm_limit: int | None = None) -> AuthContext:
         scopes=frozenset({"chat:write"}),
         allowed_models=None,
         rpm_limit=rpm_limit,
+        tpm_limit=None,
     )
 
 

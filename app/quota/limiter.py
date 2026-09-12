@@ -1,14 +1,17 @@
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from redis.exceptions import RedisError
 
 from app.auth.dependencies import AuthContext
 from app.quota.bucket import BucketStore
+from app.router.tokens import estimate_prompt_tokens
+from app.schemas.chat import ChatCompletionRequest
 
 logger = logging.getLogger(__name__)
 
 _SECONDS_PER_MINUTE = 60
+_REDIS_FAILURES = (RedisError, OSError, TimeoutError)
 
 
 class RateLimitExceededError(Exception):
@@ -19,6 +22,67 @@ class RateLimitExceededError(Exception):
         self.retry_after = retry_after
 
 
+class TokenLimitExceededError(Exception):
+    """A key's tokens-per-minute allowance cannot cover a request right now.
+
+    With no ``retry_after`` the request is simply too big for the key's limit, so waiting would
+    never help and the caller should shrink it.
+    """
+
+    def __init__(self, limit: int, requested: int, retry_after: float | None) -> None:
+        self.limit = limit
+        self.requested = requested
+        self.retry_after = retry_after
+        self.too_large = retry_after is None
+        if self.too_large:
+            message = (
+                f"Request too large: it needs about {requested} tokens, more than this key's "
+                f"limit of {limit} tokens per minute. Reduce the prompt or max_tokens."
+            )
+        else:
+            message = (
+                f"Rate limit reached: {limit} tokens per minute "
+                f"(this request needs about {requested}). "
+                f"Try again in {max(1, round(retry_after or 0))}s."
+            )
+        super().__init__(message)
+
+
+class Reservation:
+    """Tokens set aside for one request, to be settled against what it really used.
+
+    Settling refunds whatever was reserved but not used, or charges for any excess. It happens
+    at most once, so calling it again (a cleanup path after a normal finish, say) is harmless.
+    """
+
+    def __init__(
+        self,
+        reserved: int,
+        prompt_tokens: int,
+        adjust: Callable[[int], Awaitable[None]] | None,
+    ) -> None:
+        self.reserved = reserved
+        self.prompt_tokens = prompt_tokens  # our estimate, for settling streams without usage
+        self._adjust = adjust
+        self._settled = False
+
+    async def settle(self, actual_tokens: int) -> None:
+        if self._settled or self._adjust is None:
+            self._settled = True
+            return
+        self._settled = True
+        delta = self.reserved - max(0, actual_tokens)
+        if delta != 0:
+            await self._adjust(delta)
+
+    async def release(self) -> None:
+        """The request used nothing (it failed before producing output): refund everything."""
+        await self.settle(0)
+
+
+NO_RESERVATION = Reservation(0, 0, None)
+
+
 class RateLimiter:
     """Per-key quotas, enforced with token buckets in Redis."""
 
@@ -27,14 +91,24 @@ class RateLimiter:
         store: BucketStore,
         *,
         default_rpm: int | None = None,
+        default_tpm: int | None = None,
+        completion_reserve: int = 512,
         now_ms: Callable[[], int] | None = None,
     ) -> None:
         self._store = store
         self._default_rpm = default_rpm
+        self._default_tpm = default_tpm
+        self._completion_reserve = completion_reserve
         self._now_ms = now_ms  # tests only; production uses Redis's clock
 
     def rpm_for(self, auth: AuthContext) -> int | None:
         return auth.rpm_limit if auth.rpm_limit is not None else self._default_rpm
+
+    def tpm_for(self, auth: AuthContext) -> int | None:
+        return auth.tpm_limit if auth.tpm_limit is not None else self._default_tpm
+
+    def _clock(self) -> int | None:
+        return None if self._now_ms is None else self._now_ms()
 
     async def check_request(self, auth: AuthContext) -> None:
         """Count one request against the key's per-minute limit; raise if it is used up.
@@ -51,12 +125,54 @@ class RateLimiter:
                 cost=1,
                 capacity=limit,
                 refill_per_second=limit / _SECONDS_PER_MINUTE,
-                now_ms=None if self._now_ms is None else self._now_ms(),
+                now_ms=self._clock(),
             )
-        except (RedisError, OSError, TimeoutError):
+        except _REDIS_FAILURES:
             # Interim policy: a broken limiter must not take the whole gateway down with it.
             # A configurable fail-open/closed choice replaces this once the quotas are complete.
             logger.warning("rate limiting unavailable, allowing request", exc_info=True)
             return
         if not result.allowed:
             raise RateLimitExceededError(limit, result.retry_after)
+
+    def estimate_tokens(self, request: ChatCompletionRequest) -> tuple[int, int]:
+        """(prompt tokens, tokens to reserve) for a request, before anything is known for sure."""
+        prompt = estimate_prompt_tokens(request)
+        completion = (request.max_tokens or self._completion_reserve) * max(1, request.n)
+        return prompt, prompt + completion
+
+    async def reserve_tokens(
+        self, auth: AuthContext, request: ChatCompletionRequest
+    ) -> Reservation:
+        """Set aside the tokens a request will probably need; raise if the key cannot cover them.
+
+        The real usage is only known once the model has answered, so the estimate (the prompt
+        plus ``max_tokens``, or a default) is taken up front and the difference is settled
+        afterwards. Without this a key could start any number of requests at once.
+        """
+        limit = self.tpm_for(auth)
+        if limit is None:
+            return NO_RESERVATION
+        prompt, needed = self.estimate_tokens(request)
+        name = f"tpm:{auth.key_id}"
+        rate = limit / _SECONDS_PER_MINUTE
+        try:
+            result = await self._store.take(
+                name, cost=needed, capacity=limit, refill_per_second=rate, now_ms=self._clock()
+            )
+        except _REDIS_FAILURES:
+            logger.warning("token limiting unavailable, allowing request", exc_info=True)
+            return NO_RESERVATION
+        if not result.allowed:
+            raise TokenLimitExceededError(limit, needed, result.retry_after)
+
+        async def adjust(delta: int) -> None:
+            try:
+                await self._store.adjust(
+                    name, delta=delta, capacity=limit, refill_per_second=rate, now_ms=self._clock()
+                )
+            except _REDIS_FAILURES:
+                # The reservation simply stands: the key is charged the estimate, never less.
+                logger.warning("could not settle token reservation", exc_info=True)
+
+        return Reservation(needed, prompt, adjust)

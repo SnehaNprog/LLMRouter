@@ -21,9 +21,11 @@ class Settings(BaseSettings):
     )
     redis_max_connections: int = 50
     redis_key_prefix: str = "llmrouter:"
-    default_rpm_limit: int | None = (
-        None  # requests per minute for keys without their own; None: unlimited
-    )
+    # Per-minute allowances for keys that do not set their own; None means unlimited.
+    default_rpm_limit: int | None = None
+    default_tpm_limit: int | None = None
+    # Completion tokens assumed when a request sets no max_tokens; settled against real usage.
+    default_completion_reserve: int = 512
     http_connect_timeout: float = 5.0
     http_read_timeout: float = 60.0
     http_write_timeout: float = 10.0

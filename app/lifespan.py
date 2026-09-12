@@ -48,6 +48,8 @@ def make_lifespan(
         app.state.limiter = RateLimiter(
             BucketStore(redis, settings.redis_key_prefix + "quota:"),
             default_rpm=settings.default_rpm_limit,
+            default_tpm=settings.default_tpm_limit,
+            completion_reserve=settings.default_completion_reserve,
         )
         app.state.readiness_checks["redis"] = partial(redis_ready, redis)
         try:

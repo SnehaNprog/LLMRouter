@@ -55,6 +55,8 @@ class ApiKey(Base):
     allowed_models: Mapped[list[str] | None] = mapped_column(JSON(none_as_null=True), default=None)
     # Requests per minute this key may make; NULL falls back to the gateway-wide default.
     rpm_limit: Mapped[int | None] = mapped_column(default=None)
+    # Tokens per minute (prompt plus completion); NULL falls back to the gateway-wide default.
+    tpm_limit: Mapped[int | None] = mapped_column(default=None)
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 

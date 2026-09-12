@@ -96,6 +96,7 @@ class AuthedClient(TestClient):
         scopes: list[str] | None = None,
         allowed_models: list[str] | None = None,
         rpm_limit: int | None = None,
+        tpm_limit: int | None = None,
     ) -> str:
         """Create another key for the same tenant; return its secret."""
 
@@ -110,6 +111,7 @@ class AuthedClient(TestClient):
                     scopes=scopes,
                     allowed_models=allowed_models,
                     rpm_limit=rpm_limit,
+                    tpm_limit=tpm_limit,
                 )
                 return str(secret)
 

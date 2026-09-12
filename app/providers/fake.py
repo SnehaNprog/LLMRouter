@@ -35,6 +35,7 @@ class FakeProvider(Provider):
         error_factory: Callable[[], ProviderError] | None = None,
         prompt_tokens: int = 10,
         completion_tokens: int = 5,
+        stream_usage: bool = False,
         rng: random.Random | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
@@ -45,6 +46,7 @@ class FakeProvider(Provider):
         self.fail_first = fail_first
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
+        self.stream_usage = stream_usage
         self._error_factory = error_factory or (
             lambda: ProviderDown("fake provider failure", provider=name)
         )
@@ -96,3 +98,11 @@ class FakeProvider(Provider):
         for position, word in enumerate(words):
             yield chunk(Delta(content=word if position == 0 else f" {word}"))
         yield chunk(Delta(), finish=True)
+        if self.stream_usage:  # like OpenAI's include_usage: a final chunk with no choices
+            yield ChatCompletionChunk(
+                id=chunk_id,
+                created=0,
+                model=request.model,
+                choices=[],
+                usage=Usage.of(self.prompt_tokens, self.completion_tokens),
+            )

@@ -21,7 +21,7 @@ from app.providers.errors import (
     RateLimited,
     Timeout,
 )
-from app.quota.limiter import RateLimitExceededError
+from app.quota.limiter import RateLimitExceededError, TokenLimitExceededError
 from app.router.context import ContextLengthExceededError
 from app.router.registry import UnknownModelError
 from app.schemas.error import ErrorBody, ErrorResponse
@@ -138,6 +138,15 @@ async def _rate_limit_handler(_: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def _token_limit_handler(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, TokenLimitExceededError)
+    headers = None
+    if exc.retry_after is not None:
+        headers = {"Retry-After": str(max(1, math.ceil(exc.retry_after)))}
+    code = "request_too_large" if exc.too_large else "rate_limit_exceeded"
+    return error_response(429, str(exc), type="rate_limit_error", code=code, headers=headers)
+
+
 async def _context_length_handler(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ContextLengthExceededError)
     return error_response(
@@ -180,4 +189,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(UnknownModelError, _unknown_model_handler)
     app.add_exception_handler(ContextLengthExceededError, _context_length_handler)
     app.add_exception_handler(RateLimitExceededError, _rate_limit_handler)
+    app.add_exception_handler(TokenLimitExceededError, _token_limit_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)

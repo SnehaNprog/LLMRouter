@@ -270,3 +270,109 @@ async def test_invalid_arguments_are_rejected(
 async def test_a_bucket_needs_a_name(store: BucketStore) -> None:
     with pytest.raises(ValueError, match="name"):
         await store.take("", cost=1, capacity=10)
+
+
+# ---------- adjusting a balance (settling reservations) ----------
+
+
+async def adjust(store: BucketStore, delta: int, **kwargs: object) -> int:
+    options: dict[str, object] = {"capacity": 10, "now_ms": T0, **kwargs}
+    return await store.adjust("b", delta=delta, **options)  # type: ignore[arg-type]
+
+
+async def test_a_credit_raises_the_balance(store: BucketStore) -> None:
+    await take(store, 8)
+
+    assert await adjust(store, 5) == 7
+
+
+async def test_a_credit_cannot_overfill_the_bucket(store: BucketStore) -> None:
+    await take(store, 2)
+
+    assert await adjust(store, 50) == 10
+
+
+async def test_a_debit_lowers_the_balance(store: BucketStore) -> None:
+    await take(store, 2)
+
+    assert await adjust(store, -3) == 5
+
+
+async def test_a_debit_can_leave_a_debt(store: BucketStore) -> None:
+    await take(store, 10)
+
+    assert await adjust(store, -4) == -4
+
+
+async def test_a_debt_blocks_takes_until_it_is_paid_off(store: BucketStore) -> None:
+    await take(store, 10, refill_per_second=2)
+    await adjust(store, -4, refill_per_second=2)  # 4 in debt
+
+    blocked = await take(store, 1, refill_per_second=2)  # needs 5 tokens' worth of refill
+    sooner = await take(store, 1, refill_per_second=2, now_ms=T0 + 2_000)
+    ready = await take(store, 1, refill_per_second=2, now_ms=T0 + 2_500)
+
+    assert blocked.allowed is False
+    assert blocked.retry_after == pytest.approx(2.5)
+    assert sooner.allowed is False
+    assert ready.allowed is True
+
+
+async def test_debt_is_limited_to_one_capacity(store: BucketStore) -> None:
+    assert await adjust(store, -1_000_000) == -10  # a huge overrun cannot lock a key out for good
+
+
+async def test_adjusting_a_missing_bucket_starts_from_full(store: BucketStore) -> None:
+    assert await adjust(store, -3) == 7
+
+
+async def test_refill_is_applied_before_an_adjustment(store: BucketStore) -> None:
+    await take(store, 10, refill_per_second=2)
+
+    after = await adjust(store, -1, refill_per_second=2, now_ms=T0 + 1_000)  # 2 refilled, 1 spent
+
+    assert after == 1
+
+
+async def test_adjusting_never_rewinds_the_clock(store: BucketStore) -> None:
+    await take(store, 10, refill_per_second=2)
+
+    await adjust(store, 0, refill_per_second=2, now_ms=T0 - 60_000)
+
+    assert (await take(store, 0, refill_per_second=2)).remaining == 0
+
+
+async def test_concurrent_adjustments_lose_nothing(store: BucketStore) -> None:
+    await store.take("net", cost=500, capacity=1_000, now_ms=T0)  # 500 left
+
+    await asyncio.gather(
+        *[store.adjust("net", delta=-1, capacity=1_000, now_ms=T0) for _ in range(300)],
+        *[store.adjust("net", delta=1, capacity=1_000, now_ms=T0) for _ in range(100)],
+    )
+
+    assert (await store.take("net", cost=0, capacity=1_000, now_ms=T0)).remaining == 300
+
+
+async def test_adjusting_keeps_the_expiry(store: BucketStore, redis_client: Redis) -> None:
+    await store.adjust("e", delta=-1, capacity=10, refill_per_second=5)
+
+    assert 0 < await redis_client.pttl("llmrouter:quota:e") <= 3_000
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"capacity": 0}, "capacity"),
+        ({"delta": 2**60}, "delta"),
+        ({"delta": -(2**60)}, "delta"),
+        ({"refill_per_second": -1}, "refill"),
+        ({"ttl_seconds": 0}, "ttl"),
+    ],
+)
+async def test_invalid_adjustments_are_rejected(
+    store: BucketStore, kwargs: dict[str, object], message: str
+) -> None:
+    arguments: dict[str, object] = {"delta": 1, "capacity": 10, **kwargs}
+
+    with pytest.raises(ValueError, match=message):
+        await store.adjust("b", **arguments)  # type: ignore[arg-type]

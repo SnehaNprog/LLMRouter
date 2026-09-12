@@ -36,6 +36,7 @@ class AuthContext:
     scopes: frozenset[str]
     allowed_models: tuple[str, ...] | None  # None: every model
     rpm_limit: int | None  # None: the gateway default
+    tpm_limit: int | None  # None: the gateway default
 
 
 def _bearer_token(request: Request) -> str:
@@ -79,6 +80,7 @@ async def authenticate(
         scopes=frozenset(key.scopes),
         allowed_models=None if key.allowed_models is None else tuple(key.allowed_models),
         rpm_limit=key.rpm_limit,
+        tpm_limit=key.tpm_limit,
     )
     request.state.auth = context  # lets the access log say who made the call
     return context
