@@ -2,7 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.service import TenantNotFoundError
+from app.auth.service import INHERIT, TenantNotFoundError, _Inherit, budget_to_nano
 from app.db.models import Tenant
 
 
@@ -29,8 +29,12 @@ def clean_tenant_name(name: str) -> str:
     return name
 
 
-async def create_tenant(session: AsyncSession, name: str) -> Tenant:
-    tenant = Tenant(name=clean_tenant_name(name))
+async def create_tenant(
+    session: AsyncSession, name: str, monthly_budget_usd: float | None = None
+) -> Tenant:
+    tenant = Tenant(
+        name=clean_tenant_name(name), monthly_budget_nano_usd=budget_to_nano(monthly_budget_usd)
+    )
     session.add(tenant)
     try:
         await session.commit()
@@ -60,14 +64,21 @@ async def update_tenant(
     *,
     name: str | None = None,
     is_active: bool | None = None,
+    monthly_budget_usd: float | None | _Inherit = INHERIT,
 ) -> Tenant:
-    if name is None and is_active is None:
-        raise ValueError("nothing to update: send a name and/or is_active")
+    """Change a tenant. ``monthly_budget_usd=None`` removes the budget; leaving it out keeps it."""
+    if name is None and is_active is None and isinstance(monthly_budget_usd, _Inherit):
+        raise ValueError("nothing to update: send a name, is_active and/or monthly_budget_usd")
+    budget_nano = (
+        INHERIT if isinstance(monthly_budget_usd, _Inherit) else budget_to_nano(monthly_budget_usd)
+    )
     tenant = await get_tenant(session, tenant_id)
     if name is not None:
         tenant.name = clean_tenant_name(name)
     if is_active is not None:
         tenant.is_active = is_active
+    if not isinstance(budget_nano, _Inherit):
+        tenant.monthly_budget_nano_usd = budget_nano
     try:
         await session.commit()
     except IntegrityError:

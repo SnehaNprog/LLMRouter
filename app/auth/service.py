@@ -10,6 +10,7 @@ from app.auth.keys import generate_key, hash_key, looks_like_key
 from app.auth.model_access import normalize_allowed_models
 from app.auth.scopes import DEFAULT_SCOPES, normalize_scopes
 from app.db.models import ApiKey, Tenant, utcnow
+from app.quota.budget import nano_to_usd, usd_to_nano
 
 
 class TenantNotFoundError(Exception):
@@ -48,6 +49,8 @@ class KeyInactiveError(Exception):
 
 MAX_RPM_LIMIT = 1_000_000
 MAX_TPM_LIMIT = 1_000_000_000
+MAX_BUDGET_USD = 1_000_000.0
+MIN_BUDGET_USD = 0.000001
 
 
 def _check_rpm_limit(rpm_limit: int | None) -> None:
@@ -58,6 +61,17 @@ def _check_rpm_limit(rpm_limit: int | None) -> None:
 def _check_tpm_limit(tpm_limit: int | None) -> None:
     if tpm_limit is not None and not 1 <= tpm_limit <= MAX_TPM_LIMIT:
         raise ValueError(f"tpm_limit must be between 1 and {MAX_TPM_LIMIT}")
+
+
+def budget_to_nano(monthly_budget_usd: float | None) -> int | None:
+    """Validate a monthly budget in dollars and convert it to the nano-dollars we store."""
+    if monthly_budget_usd is None:
+        return None
+    if not MIN_BUDGET_USD <= monthly_budget_usd <= MAX_BUDGET_USD:
+        raise ValueError(
+            f"monthly_budget_usd must be between {MIN_BUDGET_USD} and {MAX_BUDGET_USD:,.0f}"
+        )
+    return usd_to_nano(monthly_budget_usd)
 
 
 def _check_expiry(expires_at: datetime | None) -> None:
@@ -78,6 +92,7 @@ async def create_api_key(
     allowed_models: Sequence[str] | None = None,
     rpm_limit: int | None = None,
     tpm_limit: int | None = None,
+    monthly_budget_usd: float | None = None,
 ) -> tuple[ApiKey, str]:
     """Create a key for a tenant. Returns the record and the plaintext secret.
 
@@ -89,6 +104,7 @@ async def create_api_key(
     _check_expiry(expires_at)
     _check_rpm_limit(rpm_limit)
     _check_tpm_limit(tpm_limit)
+    budget_nano = budget_to_nano(monthly_budget_usd)
     granted = normalize_scopes(DEFAULT_SCOPES if scopes is None else scopes)
     models = None if allowed_models is None else normalize_allowed_models(allowed_models)
     name = name.strip()
@@ -114,6 +130,7 @@ async def create_api_key(
         allowed_models=models,
         rpm_limit=rpm_limit,
         tpm_limit=tpm_limit,
+        monthly_budget_nano_usd=budget_nano,
     )
     session.add(key)
     await session.commit()
@@ -157,6 +174,7 @@ async def rotate_api_key(
     allowed_models: Sequence[str] | None | _Inherit = INHERIT,
     rpm_limit: int | None | _Inherit = INHERIT,
     tpm_limit: int | None | _Inherit = INHERIT,
+    monthly_budget_usd: float | None | _Inherit = INHERIT,
 ) -> tuple[ApiKey, str]:
     """Replace a key with a fresh one under the same name.
 
@@ -183,6 +201,9 @@ async def rotate_api_key(
         None if models is None else list(models),
         old.rpm_limit if isinstance(rpm_limit, _Inherit) else rpm_limit,
         old.tpm_limit if isinstance(tpm_limit, _Inherit) else tpm_limit,
+        (None if old.monthly_budget_nano_usd is None else nano_to_usd(old.monthly_budget_nano_usd))
+        if isinstance(monthly_budget_usd, _Inherit)
+        else monthly_budget_usd,
     )
     if grace == timedelta(0):
         old.revoked_at = utcnow()

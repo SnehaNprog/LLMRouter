@@ -1,10 +1,11 @@
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 
 from redis.exceptions import RedisError
 
 from app.auth.dependencies import AuthContext
 from app.quota.bucket import BucketStore
+from app.quota.reservation import NO_RESERVATION, Reservation
 from app.router.tokens import estimate_prompt_tokens
 from app.schemas.chat import ChatCompletionRequest
 
@@ -46,41 +47,6 @@ class TokenLimitExceededError(Exception):
                 f"Try again in {max(1, round(retry_after or 0))}s."
             )
         super().__init__(message)
-
-
-class Reservation:
-    """Tokens set aside for one request, to be settled against what it really used.
-
-    Settling refunds whatever was reserved but not used, or charges for any excess. It happens
-    at most once, so calling it again (a cleanup path after a normal finish, say) is harmless.
-    """
-
-    def __init__(
-        self,
-        reserved: int,
-        prompt_tokens: int,
-        adjust: Callable[[int], Awaitable[None]] | None,
-    ) -> None:
-        self.reserved = reserved
-        self.prompt_tokens = prompt_tokens  # our estimate, for settling streams without usage
-        self._adjust = adjust
-        self._settled = False
-
-    async def settle(self, actual_tokens: int) -> None:
-        if self._settled or self._adjust is None:
-            self._settled = True
-            return
-        self._settled = True
-        delta = self.reserved - max(0, actual_tokens)
-        if delta != 0:
-            await self._adjust(delta)
-
-    async def release(self) -> None:
-        """The request used nothing (it failed before producing output): refund everything."""
-        await self.settle(0)
-
-
-NO_RESERVATION = Reservation(0, 0, None)
 
 
 class RateLimiter:

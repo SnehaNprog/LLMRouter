@@ -37,6 +37,8 @@ class AuthContext:
     allowed_models: tuple[str, ...] | None  # None: every model
     rpm_limit: int | None  # None: the gateway default
     tpm_limit: int | None  # None: the gateway default
+    key_budget_nano: int | None  # monthly spending cap of the key, nano-dollars; None: no cap
+    tenant_budget_nano: int | None  # monthly cap of the whole organisation
 
 
 def _bearer_token(request: Request) -> str:
@@ -81,6 +83,8 @@ async def authenticate(
         allowed_models=None if key.allowed_models is None else tuple(key.allowed_models),
         rpm_limit=key.rpm_limit,
         tpm_limit=key.tpm_limit,
+        key_budget_nano=key.monthly_budget_nano_usd,
+        tenant_budget_nano=key.tenant.monthly_budget_nano_usd,
     )
     request.state.auth = context  # lets the access log say who made the call
     return context

@@ -3,7 +3,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import JSON, ForeignKey, String, text
+from sqlalchemy import JSON, BigInteger, ForeignKey, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.auth.scopes import DEFAULT_SCOPES
@@ -26,6 +26,8 @@ class Tenant(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(200), unique=True)
     is_active: Mapped[bool] = mapped_column(default=True)
+    # Calendar-month spending cap for the whole organisation, in nano-dollars; NULL: no cap.
+    monthly_budget_nano_usd: Mapped[int | None] = mapped_column(BigInteger, default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     api_keys: Mapped[list["ApiKey"]] = relationship(
@@ -57,6 +59,8 @@ class ApiKey(Base):
     rpm_limit: Mapped[int | None] = mapped_column(default=None)
     # Tokens per minute (prompt plus completion); NULL falls back to the gateway-wide default.
     tpm_limit: Mapped[int | None] = mapped_column(default=None)
+    # Calendar-month spending cap for this key, in nano-dollars; NULL: no cap.
+    monthly_budget_nano_usd: Mapped[int | None] = mapped_column(BigInteger, default=None)
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
     revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime, default=None)
 

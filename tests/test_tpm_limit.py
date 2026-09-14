@@ -21,12 +21,10 @@ from app.core.redis import build_redis_client
 from app.providers.errors import ProviderDown
 from app.providers.fake import FakeProvider
 from app.quota.bucket import BucketStore, TakeResult
-from app.quota.limiter import (
-    NO_RESERVATION,
-    RateLimiter,
-    Reservation,
-    TokenLimitExceededError,
-)
+from app.quota.limiter import RateLimiter, TokenLimitExceededError
+from app.quota.quota import RequestQuota
+from app.quota.reservation import NO_RESERVATION, Reservation
+from app.router.router import Served
 from app.router.tokens import estimate_text_tokens
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk, ChunkChoice, Delta
@@ -47,6 +45,8 @@ def auth(tpm_limit: int | None = 1_000) -> AuthContext:
         allowed_models=None,
         rpm_limit=None,
         tpm_limit=tpm_limit,
+        key_budget_nano=None,
+        tenant_budget_nano=None,
     )
 
 
@@ -340,6 +340,7 @@ class Recorder:
             self.settled_with.append(reserved - delta)  # recover the "actual" from the delta
 
         self.reservation = Reservation(reserved, prompt, adjust)
+        self.quota = RequestQuota(self.reservation, NO_RESERVATION, prompt)
 
 
 async def chunks(*items: ChatCompletionChunk) -> AsyncIterator[ChatCompletionChunk]:
@@ -350,7 +351,7 @@ async def chunks(*items: ChatCompletionChunk) -> AsyncIterator[ChatCompletionChu
 async def test_a_client_disconnecting_mid_stream_still_settles() -> None:
     recorder = Recorder(reserved=500, prompt=8)
     first = text_chunk("a" * 40)  # about 10 tokens of text
-    stream = _event_stream(first, chunks(text_chunk("b" * 400)), recorder.reservation)
+    stream = _event_stream(first, chunks(text_chunk("b" * 400)), recorder.quota, Served())
 
     await anext(stream)  # the client reads one event ...
     await stream.aclose()  # ... then goes away
@@ -361,7 +362,9 @@ async def test_a_client_disconnecting_mid_stream_still_settles() -> None:
 async def test_a_stream_that_runs_dry_settles_on_what_was_sent() -> None:
     recorder = Recorder(reserved=500, prompt=8)
 
-    events = [e async for e in _event_stream(text_chunk("x" * 80), chunks(), recorder.reservation)]
+    events = [
+        e async for e in _event_stream(text_chunk("x" * 80), chunks(), recorder.quota, Served())
+    ]
 
     assert events[-1] == "data: [DONE]\n\n"
     assert recorder.settled_with == [8 + 20]
@@ -379,7 +382,10 @@ async def test_reported_usage_beats_the_estimate() -> None:
         }
     )
 
-    _ = [e async for e in _event_stream(text_chunk("x" * 400), chunks(usage), recorder.reservation)]
+    _ = [
+        e
+        async for e in _event_stream(text_chunk("x" * 400), chunks(usage), recorder.quota, Served())
+    ]
 
     assert recorder.settled_with == [42]
 
@@ -391,7 +397,9 @@ async def test_a_stream_that_fails_part_way_settles_on_what_was_sent() -> None:
         yield text_chunk("y" * 40)
         raise ProviderDown("reset", provider="p")
 
-    events = [e async for e in _event_stream(text_chunk("x" * 40), dying(), recorder.reservation)]
+    events = [
+        e async for e in _event_stream(text_chunk("x" * 40), dying(), recorder.quota, Served())
+    ]
 
     assert "upstream_unavailable" in events[-1]
     assert recorder.settled_with == [8 + 20]  # charged for the 20 tokens that were delivered

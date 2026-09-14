@@ -4,6 +4,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.db.models import ApiKey, Tenant
+from app.quota.budget import nano_to_usd
+
+
+def _usd(nano: int | None) -> float | None:
+    return None if nano is None else nano_to_usd(nano)
 
 
 class _Request(BaseModel):
@@ -12,17 +17,24 @@ class _Request(BaseModel):
 
 class TenantCreate(_Request):
     name: str = Field(min_length=1, max_length=200)
+    monthly_budget_usd: float | None = Field(
+        default=None, ge=0.000001, le=1_000_000
+    )  # default: no cap
 
 
 class TenantUpdate(_Request):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     is_active: bool | None = None
+    monthly_budget_usd: float | None = Field(
+        default=None, ge=0.000001, le=1_000_000
+    )  # omit to keep; null removes the cap
 
 
 class TenantOut(BaseModel):
     id: str
     name: str
     is_active: bool
+    monthly_budget_usd: float | None
     created_at: datetime
 
     @classmethod
@@ -31,6 +43,7 @@ class TenantOut(BaseModel):
             id=tenant.id,
             name=tenant.name,
             is_active=tenant.is_active,
+            monthly_budget_usd=_usd(tenant.monthly_budget_nano_usd),
             created_at=tenant.created_at,
         )
 
@@ -46,6 +59,9 @@ class KeyCreate(_Request):
     allowed_models: list[str] | None = None  # default: every model
     rpm_limit: int | None = Field(default=None, ge=1, le=1_000_000)  # default: gateway default
     tpm_limit: int | None = Field(default=None, ge=1, le=1_000_000_000)  # default: gateway default
+    monthly_budget_usd: float | None = Field(
+        default=None, ge=0.000001, le=1_000_000
+    )  # default: no cap
     expires_at: datetime | None = None
 
 
@@ -58,6 +74,9 @@ class KeyRotate(_Request):
     tpm_limit: int | None = Field(
         default=None, ge=1, le=1_000_000_000
     )  # omit to keep; null: default
+    monthly_budget_usd: float | None = Field(
+        default=None, ge=0.000001, le=1_000_000
+    )  # omit to keep; null removes the cap
 
 
 class KeyOut(BaseModel):
@@ -69,6 +88,7 @@ class KeyOut(BaseModel):
     allowed_models: list[str] | None
     rpm_limit: int | None
     tpm_limit: int | None
+    monthly_budget_usd: float | None
     status: Literal["active", "expired", "revoked"]
     created_at: datetime
     last_used_at: datetime | None
@@ -86,6 +106,7 @@ class KeyOut(BaseModel):
             allowed_models=None if key.allowed_models is None else list(key.allowed_models),
             rpm_limit=key.rpm_limit,
             tpm_limit=key.tpm_limit,
+            monthly_budget_usd=_usd(key.monthly_budget_nano_usd),
             status=key.status(),
             created_at=key.created_at,
             last_used_at=key.last_used_at,

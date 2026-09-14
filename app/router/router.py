@@ -3,6 +3,7 @@ import logging
 import random
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass
 
 from app.router.context import ContextLengthExceededError, fits
 from app.router.deployment import Deployment
@@ -17,6 +18,16 @@ from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse, 
 logger = logging.getLogger(__name__)
 
 Sleep = Callable[[float], Awaitable[None]]
+
+
+@dataclass
+class Served:
+    """Filled in by the router with the deployment that actually answered a request.
+
+    Retries and fallbacks decide this late, and the caller needs it to price the request.
+    """
+
+    deployment: Deployment | None = None
 
 
 class Router:
@@ -158,7 +169,9 @@ class Router:
             },
         )
 
-    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+    async def complete(
+        self, request: ChatCompletionRequest, served: Served | None = None
+    ) -> ChatCompletionResponse:
         async def attempt(
             deployment: Deployment,
         ) -> tuple[Deployment, ChatCompletionResponse]:
@@ -173,15 +186,21 @@ class Router:
             return await self._with_retries(deployments, attempt)
 
         deployment, response = await self._across_fallbacks(request, run)
+        if served is not None:
+            served.deployment = deployment
         self._log_completion(deployment, response.usage)
         return response
 
-    def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
+    def stream(
+        self, request: ChatCompletionRequest, served: Served | None = None
+    ) -> AsyncIterator[ChatCompletionChunk]:
         # Unknown aliases raise here, before any iteration, so the API can answer with a 404.
         self.registry.get(request.model)
-        return self._stream(request)
+        return self._stream(request, served)
 
-    async def _stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
+    async def _stream(
+        self, request: ChatCompletionRequest, served: Served | None
+    ) -> AsyncIterator[ChatCompletionChunk]:
         opened = tuple[Deployment, ChatCompletionChunk | None, AsyncIterator[ChatCompletionChunk]]
 
         async def open_stream(deployment: Deployment) -> opened:
@@ -201,6 +220,8 @@ class Router:
         # Only failures before the first chunk are retried or fall back; once output has
         # started the client has seen it, so later errors propagate.
         deployment, first, rest = await self._across_fallbacks(request, run)
+        if served is not None:
+            served.deployment = deployment
         if first is not None:
             self._log_completion(deployment, first.usage)
             yield first

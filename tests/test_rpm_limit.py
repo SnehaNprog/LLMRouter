@@ -36,6 +36,8 @@ def auth(key_id: str = "key-1", rpm_limit: int | None = None) -> AuthContext:
         allowed_models=None,
         rpm_limit=rpm_limit,
         tpm_limit=None,
+        key_budget_nano=None,
+        tenant_budget_nano=None,
     )
 
 

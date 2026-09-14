@@ -21,6 +21,7 @@ from app.providers.errors import (
     RateLimited,
     Timeout,
 )
+from app.quota.budget_limiter import BudgetExceededError
 from app.quota.limiter import RateLimitExceededError, TokenLimitExceededError
 from app.router.context import ContextLengthExceededError
 from app.router.registry import UnknownModelError
@@ -147,6 +148,17 @@ async def _token_limit_handler(_: Request, exc: Exception) -> JSONResponse:
     return error_response(429, str(exc), type="rate_limit_error", code=code, headers=headers)
 
 
+async def _budget_handler(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, BudgetExceededError)
+    return error_response(
+        429,
+        str(exc),
+        type="insufficient_quota",
+        code="budget_exceeded",
+        headers={"Retry-After": str(max(1, math.ceil(exc.retry_after)))},
+    )
+
+
 async def _context_length_handler(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ContextLengthExceededError)
     return error_response(
@@ -190,4 +202,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(ContextLengthExceededError, _context_length_handler)
     app.add_exception_handler(RateLimitExceededError, _rate_limit_handler)
     app.add_exception_handler(TokenLimitExceededError, _token_limit_handler)
+    app.add_exception_handler(BudgetExceededError, _budget_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)

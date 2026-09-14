@@ -67,7 +67,7 @@ async def create_tenant_endpoint(
     body: TenantCreate, session: Session, _: Annotated[AuthContext, Depends(tenant_admin)]
 ) -> TenantOut:
     try:
-        return TenantOut.of(await create_tenant(session, body.name))
+        return TenantOut.of(await create_tenant(session, body.name, body.monthly_budget_usd))
     except ValueError as exc:
         raise _bad_request(exc) from None
 
@@ -103,7 +103,17 @@ async def update_tenant_endpoint(
         )
     try:
         return TenantOut.of(
-            await update_tenant(session, tenant_id, name=body.name, is_active=body.is_active)
+            await update_tenant(
+                session,
+                tenant_id,
+                name=body.name,
+                is_active=body.is_active,
+                monthly_budget_usd=(
+                    body.monthly_budget_usd
+                    if "monthly_budget_usd" in body.model_fields_set
+                    else INHERIT
+                ),
+            )
         )
     except ValueError as exc:
         raise _bad_request(exc) from None
@@ -143,6 +153,7 @@ async def create_key_endpoint(
             allowed_models=body.allowed_models,
             rpm_limit=body.rpm_limit,
             tpm_limit=body.tpm_limit,
+            monthly_budget_usd=body.monthly_budget_usd,
         )
     except ValueError as exc:
         raise _bad_request(exc) from None
@@ -192,6 +203,7 @@ async def rotate_key_endpoint(
     keep_models = "allowed_models" not in body.model_fields_set
     keep_rpm = "rpm_limit" not in body.model_fields_set
     keep_tpm = "tpm_limit" not in body.model_fields_set
+    keep_budget = "monthly_budget_usd" not in body.model_fields_set
     try:
         key, secret = await rotate_api_key(
             session,
@@ -203,6 +215,7 @@ async def rotate_key_endpoint(
             allowed_models=INHERIT if keep_models else body.allowed_models,
             rpm_limit=INHERIT if keep_rpm else body.rpm_limit,
             tpm_limit=INHERIT if keep_tpm else body.tpm_limit,
+            monthly_budget_usd=INHERIT if keep_budget else body.monthly_budget_usd,
         )
     except ValueError as exc:
         raise _bad_request(exc) from None
