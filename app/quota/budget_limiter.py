@@ -120,10 +120,11 @@ class BudgetLimiter:
             scope: Literal["key", "tenant"] = "key" if blocked.name.startswith("key:") else "tenant"
             raise BudgetExceededError(scope, blocked.limit, seconds_until_next_month(now))
 
-        async def adjust(delta: int) -> None:
+        async def adjust(delta: int) -> int | None:
             try:  # the reservation was charged up front; settling corrects it to the real cost
                 await self._store.adjust(counters, -delta)
             except _REDIS_FAILURES:
                 logger.warning("could not settle budget reservation", exc_info=True)
+            return None
 
         return Reservation(needed, 0, adjust)

@@ -5,6 +5,7 @@ from redis.exceptions import RedisError
 
 from app.auth.dependencies import AuthContext
 from app.quota.bucket import BucketStore
+from app.quota.headers import Window
 from app.quota.reservation import NO_RESERVATION, Reservation
 from app.router.tokens import estimate_prompt_tokens
 from app.schemas.chat import ChatCompletionRequest
@@ -16,11 +17,12 @@ _REDIS_FAILURES = (RedisError, OSError, TimeoutError)
 
 
 class RateLimitExceededError(Exception):
-    def __init__(self, limit: int, retry_after: float | None) -> None:
+    def __init__(self, limit: int, retry_after: float | None, window: Window) -> None:
         wait = f" Try again in {max(1, round(retry_after))}s." if retry_after is not None else ""
         super().__init__(f"Rate limit reached: {limit} requests per minute.{wait}")
         self.limit = limit
         self.retry_after = retry_after
+        self.window = window
 
 
 class TokenLimitExceededError(Exception):
@@ -30,8 +32,11 @@ class TokenLimitExceededError(Exception):
     never help and the caller should shrink it.
     """
 
-    def __init__(self, limit: int, requested: int, retry_after: float | None) -> None:
+    def __init__(
+        self, limit: int, requested: int, retry_after: float | None, window: Window
+    ) -> None:
         self.limit = limit
+        self.window = window
         self.requested = requested
         self.retry_after = retry_after
         self.too_large = retry_after is None
@@ -76,15 +81,17 @@ class RateLimiter:
     def _clock(self) -> int | None:
         return None if self._now_ms is None else self._now_ms()
 
-    async def check_request(self, auth: AuthContext) -> None:
+    async def check_request(self, auth: AuthContext) -> Window | None:
         """Count one request against the key's per-minute limit; raise if it is used up.
+
+        Returns where the allowance now stands (None when there is no limit to report on).
 
         The bucket holds a full minute's allowance and refills continuously, so a quiet key can
         burst up to its limit and a busy one is paced to limit/60 requests a second.
         """
         limit = self.rpm_for(auth)
         if limit is None:
-            return
+            return None
         try:
             result = await self._store.take(
                 f"rpm:{auth.key_id}",
@@ -97,9 +104,11 @@ class RateLimiter:
             # Interim policy: a broken limiter must not take the whole gateway down with it.
             # A configurable fail-open/closed choice replaces this once the quotas are complete.
             logger.warning("rate limiting unavailable, allowing request", exc_info=True)
-            return
+            return None
+        window = Window.from_balance(limit, result.remaining)
         if not result.allowed:
-            raise RateLimitExceededError(limit, result.retry_after)
+            raise RateLimitExceededError(limit, result.retry_after, window)
+        return window
 
     def estimate_tokens(self, request: ChatCompletionRequest) -> tuple[int, int]:
         """(prompt tokens, tokens to reserve) for a request, before anything is known for sure."""
@@ -130,15 +139,24 @@ class RateLimiter:
             logger.warning("token limiting unavailable, allowing request", exc_info=True)
             return NO_RESERVATION
         if not result.allowed:
-            raise TokenLimitExceededError(limit, needed, result.retry_after)
+            window = Window.from_balance(limit, result.remaining)
+            raise TokenLimitExceededError(limit, needed, result.retry_after, window)
 
-        async def adjust(delta: int) -> None:
+        async def adjust(delta: int) -> int | None:
             try:
-                await self._store.adjust(
+                return await self._store.adjust(
                     name, delta=delta, capacity=limit, refill_per_second=rate, now_ms=self._clock()
                 )
             except _REDIS_FAILURES:
                 # The reservation simply stands: the key is charged the estimate, never less.
                 logger.warning("could not settle token reservation", exc_info=True)
+                return None
 
-        return Reservation(needed, prompt, adjust)
+        return Reservation(needed, prompt, adjust, balance=result.remaining)
+
+    def token_window(self, auth: AuthContext, reservation: Reservation) -> Window | None:
+        """Where the key's token allowance stands, as of the reservation's latest balance."""
+        limit = self.tpm_for(auth)
+        if limit is None or reservation.balance is None:
+            return None
+        return Window.from_balance(limit, reservation.balance)

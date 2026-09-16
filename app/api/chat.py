@@ -3,7 +3,7 @@ import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from app.api.deps import get_budgets, get_limiter, get_router
@@ -14,6 +14,7 @@ from app.auth.model_access import model_allowed
 from app.auth.scopes import CHAT_WRITE
 from app.providers.errors import ProviderError
 from app.quota.budget_limiter import BudgetLimiter
+from app.quota.headers import rate_headers_of
 from app.quota.limiter import RateLimiter
 from app.quota.quota import RequestQuota, reserve_request_quota
 from app.router.router import Router, Served
@@ -28,11 +29,12 @@ chat_scope = require_scope(CHAT_WRITE)
 
 
 async def rate_limited_chat(
+    http_request: Request,
     auth: Annotated[AuthContext, Depends(chat_scope)],
     limiter: Annotated[RateLimiter, Depends(get_limiter)],
 ) -> AuthContext:
     """Authenticate, check the scope, then count the request against the key's rate limit."""
-    await limiter.check_request(auth)
+    rate_headers_of(http_request).requests = await limiter.check_request(auth)
     return auth
 
 
@@ -106,6 +108,7 @@ def _usage_of(completion: ChatCompletionResponse, quota: RequestQuota) -> tuple[
 )
 async def create_chat_completion(
     request: ChatCompletionRequest,
+    http_request: Request,
     gateway: Annotated[Router, Depends(get_router)],
     limiter: Annotated[RateLimiter, Depends(get_limiter)],
     budgets: Annotated[BudgetLimiter, Depends(get_budgets)],
@@ -117,6 +120,8 @@ async def create_chat_completion(
 
     # Set aside the tokens and money this request is expected to need; settled below.
     quota = await reserve_request_quota(limiter, budgets, auth, request, gateway.registry)
+    rate = rate_headers_of(http_request)
+    rate.tokens = limiter.token_window(auth, quota.tokens)
     served = Served()
     try:
         if not request.stream:
@@ -125,7 +130,8 @@ async def create_chat_completion(
             await quota.settle(
                 prompt_tokens=prompt, completion_tokens=generated, deployment=served.deployment
             )
-            return JSONResponse(completion.model_dump(exclude_none=True))
+            rate.tokens = limiter.token_window(auth, quota.tokens)  # now net of the real usage
+            return JSONResponse(completion.model_dump(exclude_none=True), headers=rate.as_headers())
 
         stream = gateway.stream(request, served)
         # Pull the first chunk before answering so upstream failures still become proper HTTP
@@ -140,5 +146,7 @@ async def create_chat_completion(
     return StreamingResponse(
         _event_stream(first, stream, quota, served),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        # The headers go out before the stream does, so the token figures are as of the
+        # reservation; the final usage is settled once the stream ends.
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **rate.as_headers()},
     )

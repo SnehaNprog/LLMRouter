@@ -22,6 +22,7 @@ from app.providers.errors import (
     Timeout,
 )
 from app.quota.budget_limiter import BudgetExceededError
+from app.quota.headers import rate_headers_of
 from app.quota.limiter import RateLimitExceededError, TokenLimitExceededError
 from app.router.context import ContextLengthExceededError
 from app.router.registry import UnknownModelError
@@ -129,33 +130,35 @@ async def _conflict_handler(_: Request, exc: Exception) -> JSONResponse:
     return error_response(409, str(exc), type="invalid_request_error", code="key_inactive")
 
 
-async def _rate_limit_handler(_: Request, exc: Exception) -> JSONResponse:
+async def _rate_limit_handler(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, RateLimitExceededError)
-    headers = None
+    state = rate_headers_of(request)
+    state.requests = exc.window
+    headers = state.as_headers()
     if exc.retry_after is not None:
-        headers = {"Retry-After": str(max(1, math.ceil(exc.retry_after)))}
+        headers["Retry-After"] = str(max(1, math.ceil(exc.retry_after)))
     return error_response(
         429, str(exc), type="rate_limit_error", code="rate_limit_exceeded", headers=headers
     )
 
 
-async def _token_limit_handler(_: Request, exc: Exception) -> JSONResponse:
+async def _token_limit_handler(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, TokenLimitExceededError)
-    headers = None
+    state = rate_headers_of(request)  # the request allowance was already counted
+    state.tokens = exc.window
+    headers = state.as_headers()
     if exc.retry_after is not None:
-        headers = {"Retry-After": str(max(1, math.ceil(exc.retry_after)))}
+        headers["Retry-After"] = str(max(1, math.ceil(exc.retry_after)))
     code = "request_too_large" if exc.too_large else "rate_limit_exceeded"
     return error_response(429, str(exc), type="rate_limit_error", code=code, headers=headers)
 
 
-async def _budget_handler(_: Request, exc: Exception) -> JSONResponse:
+async def _budget_handler(request: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, BudgetExceededError)
+    headers = rate_headers_of(request).as_headers()
+    headers["Retry-After"] = str(max(1, math.ceil(exc.retry_after)))
     return error_response(
-        429,
-        str(exc),
-        type="insufficient_quota",
-        code="budget_exceeded",
-        headers={"Retry-After": str(max(1, math.ceil(exc.retry_after)))},
+        429, str(exc), type="insufficient_quota", code="budget_exceeded", headers=headers
     )
 
 
