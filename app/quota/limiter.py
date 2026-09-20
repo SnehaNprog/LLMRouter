@@ -1,10 +1,9 @@
 import logging
 from collections.abc import Callable
 
-from redis.exceptions import RedisError
-
 from app.auth.dependencies import AuthContext
 from app.quota.bucket import BucketStore
+from app.quota.guard import QuotaGuard
 from app.quota.headers import Window
 from app.quota.reservation import NO_RESERVATION, Reservation
 from app.router.tokens import estimate_prompt_tokens
@@ -13,7 +12,6 @@ from app.schemas.chat import ChatCompletionRequest
 logger = logging.getLogger(__name__)
 
 _SECONDS_PER_MINUTE = 60
-_REDIS_FAILURES = (RedisError, OSError, TimeoutError)
 
 
 class RateLimitExceededError(Exception):
@@ -65,8 +63,10 @@ class RateLimiter:
         default_tpm: int | None = None,
         completion_reserve: int = 512,
         now_ms: Callable[[], int] | None = None,
+        guard: QuotaGuard | None = None,
     ) -> None:
         self._store = store
+        self._guard = guard or QuotaGuard()
         self._default_rpm = default_rpm
         self._default_tpm = default_tpm
         self._completion_reserve = completion_reserve
@@ -92,19 +92,19 @@ class RateLimiter:
         limit = self.rpm_for(auth)
         if limit is None:
             return None
-        try:
-            result = await self._store.take(
+        result = await self._guard.enforce(
+            lambda: self._store.take(
                 f"rpm:{auth.key_id}",
                 cost=1,
                 capacity=limit,
                 refill_per_second=limit / _SECONDS_PER_MINUTE,
                 now_ms=self._clock(),
-            )
-        except _REDIS_FAILURES:
-            # Interim policy: a broken limiter must not take the whole gateway down with it.
-            # A configurable fail-open/closed choice replaces this once the quotas are complete.
-            logger.warning("rate limiting unavailable, allowing request", exc_info=True)
-            return None
+            ),
+            None,
+            what="rate limiting",
+        )
+        if result is None:
+            return None  # Redis is unavailable and the policy is to fail open
         window = Window.from_balance(limit, result.remaining)
         if not result.allowed:
             raise RateLimitExceededError(limit, result.retry_after, window)
@@ -131,26 +131,27 @@ class RateLimiter:
         prompt, needed = self.estimate_tokens(request)
         name = f"tpm:{auth.key_id}"
         rate = limit / _SECONDS_PER_MINUTE
-        try:
-            result = await self._store.take(
+        result = await self._guard.enforce(
+            lambda: self._store.take(
                 name, cost=needed, capacity=limit, refill_per_second=rate, now_ms=self._clock()
-            )
-        except _REDIS_FAILURES:
-            logger.warning("token limiting unavailable, allowing request", exc_info=True)
-            return NO_RESERVATION
+            ),
+            None,
+            what="token limiting",
+        )
+        if result is None:
+            return NO_RESERVATION  # Redis is unavailable and the policy is to fail open
         if not result.allowed:
             window = Window.from_balance(limit, result.remaining)
             raise TokenLimitExceededError(limit, needed, result.retry_after, window)
 
         async def adjust(delta: int) -> int | None:
-            try:
-                return await self._store.adjust(
+            # If this fails the reservation simply stands: charged the estimate, never less.
+            return await self._guard.settle(
+                lambda: self._store.adjust(
                     name, delta=delta, capacity=limit, refill_per_second=rate, now_ms=self._clock()
-                )
-            except _REDIS_FAILURES:
-                # The reservation simply stands: the key is charged the estimate, never less.
-                logger.warning("could not settle token reservation", exc_info=True)
-                return None
+                ),
+                what="token reservation",
+            )
 
         return Reservation(needed, prompt, adjust, balance=result.remaining)
 

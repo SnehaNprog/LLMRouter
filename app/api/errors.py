@@ -22,6 +22,7 @@ from app.providers.errors import (
     Timeout,
 )
 from app.quota.budget_limiter import BudgetExceededError
+from app.quota.guard import QuotaUnavailableError
 from app.quota.headers import rate_headers_of
 from app.quota.limiter import RateLimitExceededError, TokenLimitExceededError
 from app.router.context import ContextLengthExceededError
@@ -162,6 +163,17 @@ async def _budget_handler(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def _quota_unavailable_handler(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, QuotaUnavailableError)
+    return error_response(
+        503,
+        str(exc),
+        type="api_error",
+        code="quota_unavailable",
+        headers={"Retry-After": str(max(1, math.ceil(exc.retry_after)))},
+    )
+
+
 async def _context_length_handler(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ContextLengthExceededError)
     return error_response(
@@ -206,4 +218,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(RateLimitExceededError, _rate_limit_handler)
     app.add_exception_handler(TokenLimitExceededError, _token_limit_handler)
     app.add_exception_handler(BudgetExceededError, _budget_handler)
+    app.add_exception_handler(QuotaUnavailableError, _quota_unavailable_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)

@@ -14,6 +14,7 @@ from app.db.session import create_engine, create_session_factory, database_ready
 from app.quota.bucket import BucketStore
 from app.quota.budget import BudgetStore
 from app.quota.budget_limiter import BudgetLimiter
+from app.quota.guard import QuotaGuard
 from app.quota.limiter import RateLimiter
 from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry, build_registry
@@ -47,15 +48,26 @@ def make_lifespan(
         app.state.readiness_checks["database"] = partial(database_ready, engine)
         redis = build_redis_client(settings)  # lazy: Redis being down never blocks startup
         app.state.redis = redis
+        guard = QuotaGuard(
+            settings.quota_failure_mode,
+            failure_threshold=settings.quota_breaker_threshold,
+            cooldown=settings.quota_breaker_cooldown,
+        )
+        app.state.quota_guard = guard
+        # Failing open, the gateway still works without Redis, so Redis being down must not
+        # take its pods out of rotation; failing closed, limited keys cannot be served without it.
+        app.state.optional_checks = {"redis"} if guard.mode == "open" else set()
         app.state.budgets = BudgetLimiter(
             BudgetStore(redis, settings.redis_key_prefix + "budget:"),
             completion_reserve=settings.default_completion_reserve,
+            guard=guard,
         )
         app.state.limiter = RateLimiter(
             BucketStore(redis, settings.redis_key_prefix + "quota:"),
             default_rpm=settings.default_rpm_limit,
             default_tpm=settings.default_tpm_limit,
             completion_reserve=settings.default_completion_reserve,
+            guard=guard,
         )
         app.state.readiness_checks["redis"] = partial(redis_ready, redis)
         try:

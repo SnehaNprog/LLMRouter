@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     redis_max_connections: int = 50
     redis_key_prefix: str = "llmrouter:"
     # Per-minute allowances for keys that do not set their own; None means unlimited.
+    # When Redis (which holds every quota) is unreachable: let requests through unenforced
+    # ("open") or refuse requests that have limits ("closed").
+    quota_failure_mode: Literal["open", "closed"] = "open"
+    quota_breaker_threshold: int = 3  # consecutive failures before Redis is left alone ...
+    quota_breaker_cooldown: float = 5.0  # ... for this many seconds
     default_rpm_limit: int | None = None
     default_tpm_limit: int | None = None
     # Completion tokens assumed when a request sets no max_tokens; settled against real usage.

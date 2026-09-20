@@ -4,8 +4,6 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Literal
 
-from redis.exceptions import RedisError
-
 from app.auth.dependencies import AuthContext
 from app.quota.budget import (
     BudgetStore,
@@ -15,13 +13,13 @@ from app.quota.budget import (
     nano_to_usd,
     seconds_until_next_month,
 )
+from app.quota.guard import QuotaGuard
 from app.quota.reservation import NO_RESERVATION, Reservation
 from app.router.registry import ModelRegistry
 from app.schemas.chat import ChatCompletionRequest
 
 logger = logging.getLogger(__name__)
 
-_REDIS_FAILURES = (RedisError, OSError, TimeoutError)
 _GRACE_SECONDS = 86_400  # a counter outlives its month by a day, so late settlements still land
 _PER_MILLION = 1_000_000
 
@@ -56,8 +54,10 @@ class BudgetLimiter:
         *,
         completion_reserve: int = 512,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        guard: QuotaGuard | None = None,
     ) -> None:
         self._store = store
+        self._guard = guard or QuotaGuard()
         self._completion_reserve = completion_reserve
         self._clock = clock
 
@@ -110,21 +110,21 @@ class BudgetLimiter:
         needed = self.estimate_cost(registry, request, prompt_tokens)
         if needed == 0:
             return NO_RESERVATION  # free models cannot overspend anything
-        try:
-            result = await self._store.spend(counters, needed)
-        except _REDIS_FAILURES:
-            logger.warning("budget limiting unavailable, allowing request", exc_info=True)
-            return NO_RESERVATION
+        result = await self._guard.enforce(
+            lambda: self._store.spend(counters, needed), None, what="budget limiting"
+        )
+        if result is None:
+            return NO_RESERVATION  # Redis is unavailable and the policy is to fail open
         if not result.allowed:
             blocked = next(c for c in counters if c.name == result.blocked_by)
             scope: Literal["key", "tenant"] = "key" if blocked.name.startswith("key:") else "tenant"
             raise BudgetExceededError(scope, blocked.limit, seconds_until_next_month(now))
 
         async def adjust(delta: int) -> int | None:
-            try:  # the reservation was charged up front; settling corrects it to the real cost
-                await self._store.adjust(counters, -delta)
-            except _REDIS_FAILURES:
-                logger.warning("could not settle budget reservation", exc_info=True)
+            # The reservation was charged up front; settling corrects it to the real cost.
+            await self._guard.settle(
+                lambda: self._store.adjust(counters, -delta), what="budget reservation"
+            )
             return None
 
         return Reservation(needed, 0, adjust)

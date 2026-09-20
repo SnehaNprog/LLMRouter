@@ -27,13 +27,16 @@ def health() -> dict[str, str]:
 @router.get("/ready", summary="Readiness: dependencies are usable")
 async def ready(request: Request) -> JSONResponse:
     checks: dict[str, ReadinessCheck] = request.app.state.readiness_checks
+    # A dependency the gateway can run without reports "degraded" instead of failing readiness.
+    optional: set[str] = getattr(request.app.state, "optional_checks", set())
     results: dict[str, str] = {}
     for name, check in checks.items():
         try:
-            results[name] = "ok" if await check() else "failed"
+            healthy = await check()
         except Exception:
-            results[name] = "failed"
-    is_ready = all(status == "ok" for status in results.values())
+            healthy = False
+        results[name] = "ok" if healthy else ("degraded" if name in optional else "failed")
+    is_ready = all(status != "failed" for status in results.values())
     return JSONResponse(
         status_code=200 if is_ready else 503,
         content={"status": "ready" if is_ready else "not_ready", "checks": results},

@@ -201,7 +201,7 @@ def test_redis_is_closed_on_shutdown(monkeypatch: pytest.MonkeyPatch, app_: Fast
     assert closed == [True]
 
 
-def broken_redis_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
+def broken_redis_app(monkeypatch: pytest.MonkeyPatch, **settings: Any) -> FastAPI:
     """An app whose Redis is configured but nothing is listening."""
     unreachable = Settings(_env_file=None, redis_url="redis://127.0.0.1:1/0", redis_timeout=0.2)
     monkeypatch.setattr(
@@ -211,7 +211,7 @@ def broken_redis_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     def registry_factory(_: httpx.AsyncClient) -> ModelRegistry:
         return registry_with(FakeProvider())
 
-    return create_app(Settings(_env_file=None, retry_base_delay=0.0), registry_factory)
+    return create_app(Settings(_env_file=None, retry_base_delay=0.0, **settings), registry_factory)
 
 
 def test_the_app_starts_and_serves_even_when_redis_is_down(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,16 +226,28 @@ def test_the_app_starts_and_serves_even_when_redis_is_down(monkeypatch: pytest.M
     assert chat.status_code == 200  # nothing depends on Redis yet; quotas decide that later
 
 
-def test_readiness_flags_a_down_redis_without_hiding_the_rest(
+def test_a_down_redis_degrades_readiness_without_failing_it_when_failing_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with AuthedClient(broken_redis_app(monkeypatch)) as client:
         ready = client.get("/ready")
         health = client.get("/health")
 
-    assert ready.status_code == 503
-    assert ready.json()["checks"] == {"config": "ok", "database": "ok", "redis": "failed"}
+    # The gateway still serves without Redis, so it must stay in rotation, but say so honestly.
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "ready"
+    assert ready.json()["checks"] == {"config": "ok", "database": "ok", "redis": "degraded"}
     assert health.status_code == 200  # liveness must not depend on Redis
+
+
+def test_a_down_redis_fails_readiness_when_failing_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    with AuthedClient(broken_redis_app(monkeypatch, quota_failure_mode="closed")) as client:
+        ready = client.get("/ready")
+        health = client.get("/health")
+
+    assert ready.status_code == 503  # limited keys cannot be served, so take the pod out
+    assert ready.json()["checks"] == {"config": "ok", "database": "ok", "redis": "failed"}
+    assert health.status_code == 200
 
 
 # ---------- the compose file ----------

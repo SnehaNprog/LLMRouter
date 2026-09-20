@@ -30,18 +30,18 @@ def test_not_ready_when_a_check_fails(client: TestClient, app_: FastAPI) -> None
 
 def test_not_ready_when_a_check_raises(client: TestClient, app_: FastAPI) -> None:
     async def exploding() -> bool:
-        raise ConnectionError("redis down")
+        raise ConnectionError("db down")
 
     original = app_.state.readiness_checks
-    app_.state.readiness_checks = {"redis": exploding}
+    app_.state.readiness_checks = {"database": exploding}
     try:
         response = client.get("/ready")
     finally:
         app_.state.readiness_checks = original
 
     assert response.status_code == 503
-    assert response.json()["checks"] == {"redis": "failed"}
-    assert "redis down" not in response.text
+    assert response.json()["checks"] == {"database": "failed"}
+    assert "db down" not in response.text
 
 
 def test_health_is_independent_of_readiness(client: TestClient) -> None:
