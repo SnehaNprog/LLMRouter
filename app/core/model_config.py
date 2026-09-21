@@ -1,11 +1,13 @@
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+
+from app.core.tiers import Tier
 
 ENV_PREFIX = "os.environ/"
 
@@ -34,6 +36,8 @@ class ModelEntry(BaseModel):
     # USD per million tokens; 0 means free (local models). Set these from your vendor's price list.
     input_cost_per_mtok: float = Field(default=0.0, ge=0)
     output_cost_per_mtok: float = Field(default=0.0, ge=0)
+    # slm / mid / frontier. Needed for smart routing; every entry of one name must agree.
+    tier: Tier | None = None
 
     @field_validator("api_key")
     @classmethod
@@ -83,6 +87,7 @@ class ModelConfig:
     input_cost_per_mtok: float = 0.0
     output_cost_per_mtok: float = 0.0
     context_window: int | None = None
+    tier: Tier | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,28 @@ class ModelsConfig:
     models: list[ModelConfig]
     # alias -> aliases to try, in order, once every retry on it has failed
     fallbacks: dict[str, tuple[str, ...]]
+
+
+def _tier_name(tier: Tier | None) -> str:
+    return "(none)" if tier is None else f"'{tier.value}'"
+
+
+def tier_problems(configs: Sequence[ModelConfig]) -> list[str]:
+    """Entries that share a name are one model, so they must declare the same tier (or none)."""
+    first: dict[str, int] = {}
+    problems = []
+    for index, config in enumerate(configs):
+        earlier = first.setdefault(config.name, index)
+        if earlier == index:
+            continue
+        expected = configs[earlier].tier
+        if config.tier != expected:
+            problems.append(
+                f"models[{index}] ('{config.name}'): tier {_tier_name(config.tier)} conflicts "
+                f"with tier {_tier_name(expected)} of models[{earlier}]; entries with the same "
+                "name must agree"
+            )
+    return problems
 
 
 def _format_location(location: tuple[int | str, ...]) -> str:
@@ -139,9 +166,11 @@ def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsCon
                 input_cost_per_mtok=entry.input_cost_per_mtok,
                 output_cost_per_mtok=entry.output_cost_per_mtok,
                 context_window=entry.context_window,
+                tier=entry.tier,
             )
         )
 
+    problems.extend(tier_problems(configs))
     aliases = {config.name for config in configs}
     for source, targets in parsed.fallbacks.items():
         if source not in aliases:

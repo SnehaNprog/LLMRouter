@@ -2,6 +2,7 @@
 models:
   # Several entries with the same name form one alias; traffic is split by weight.
   - name: fast
+    tier: slm  # slm / mid / frontier: how capable (and costly) the model is
     provider: openai_compatible
     model: llama-3.1-8b-instant
     base_url: https://api.groq.com/openai/v1
@@ -13,7 +14,18 @@ models:
     input_cost_per_mtok: 0.05
     output_cost_per_mtok: 0.08
 
+  - name: balanced
+    tier: mid
+    provider: openai_compatible
+    model: llama-3.3-70b-versatile
+    base_url: https://api.groq.com/openai/v1
+    api_key: os.environ/GROQ_API_KEY
+    context_window: 131072
+    input_cost_per_mtok: 0.59
+    output_cost_per_mtok: 0.79
+
   - name: smart
+    tier: frontier
     provider: anthropic
     model: claude-sonnet-5-5
     api_key: os.environ/ANTHROPIC_API_KEY
@@ -23,6 +35,7 @@ models:
 
   # Local models (Ollama, vLLM) usually need no key.
   - name: local
+    tier: slm
     provider: openai_compatible
     model: llama3.2
     base_url: http://localhost:11434/v1

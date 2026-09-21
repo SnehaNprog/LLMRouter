@@ -2,7 +2,8 @@ from collections.abc import Iterable, Mapping, Sequence
 
 import httpx
 
-from app.core.model_config import ConfigError, ModelConfig
+from app.core.model_config import ConfigError, ModelConfig, tier_problems
+from app.core.tiers import TIERS, Tier
 from app.providers.factory import build_provider
 from app.router.deployment import Deployment
 
@@ -24,6 +25,9 @@ class ModelRegistry:
         deployments: Iterable[Deployment],
         fallbacks: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
+        deployments = list(deployments)
+        if problems := tier_problems([d.config for d in deployments]):
+            raise ConfigError("inconsistent tiers:\n  - " + "\n  - ".join(problems))
         by_alias: dict[str, list[Deployment]] = {}
         seen: set[str] = set()
         for deployment in deployments:
@@ -65,6 +69,19 @@ class ModelRegistry:
 
         visit(alias)
         return order
+
+    def tier_of(self, alias: str) -> Tier | None:
+        """The tier a model was declared with, or None if it takes no part in smart routing."""
+        return self.get(alias)[0].config.tier
+
+    def aliases_in_tier(self, tier: Tier) -> list[str]:
+        """The models of a tier, in config order."""
+        return [alias for alias in self._by_alias if self.tier_of(alias) is tier]
+
+    def tiers(self) -> dict[Tier, list[str]]:
+        """Every tier that has models, weakest first, with its models in config order."""
+        grouped = {tier: self.aliases_in_tier(tier) for tier in TIERS}
+        return {tier: aliases for tier, aliases in grouped.items() if aliases}
 
     def aliases(self) -> list[str]:
         return list(self._by_alias)

@@ -184,4 +184,4 @@ def test_shipped_example_config_is_valid() -> None:
         {"GROQ_API_KEY": "a", "ANTHROPIC_API_KEY": "b"},
     )
 
-    assert {m.name for m in models} == {"fast", "smart", "local"}
+    assert {m.name for m in models} == {"fast", "balanced", "smart", "local"}
