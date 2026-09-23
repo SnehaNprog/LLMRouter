@@ -6,6 +6,7 @@ from app.core.model_config import ConfigError, ModelConfig, tier_problems
 from app.core.tiers import TIERS, Tier
 from app.providers.factory import build_provider
 from app.router.deployment import Deployment
+from app.routing.score import DEFAULT_WEIGHTS, ComplexityWeights
 
 
 class UnknownModelError(Exception):
@@ -24,7 +25,9 @@ class ModelRegistry:
         self,
         deployments: Iterable[Deployment],
         fallbacks: Mapping[str, Sequence[str]] | None = None,
+        complexity_weights: ComplexityWeights | None = None,
     ) -> None:
+        self.complexity_weights = complexity_weights or DEFAULT_WEIGHTS
         deployments = list(deployments)
         if problems := tier_problems([d.config for d in deployments]):
             raise ConfigError("inconsistent tiers:\n  - " + "\n  - ".join(problems))
@@ -97,8 +100,10 @@ def build_registry(
     configs: Iterable[ModelConfig],
     client: httpx.AsyncClient,
     fallbacks: Mapping[str, Sequence[str]] | None = None,
+    complexity_weights: ComplexityWeights | None = None,
 ) -> ModelRegistry:
     return ModelRegistry(
         (Deployment.create(config, build_provider(config, client)) for config in configs),
         fallbacks,
+        complexity_weights,
     )

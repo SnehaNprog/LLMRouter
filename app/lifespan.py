@@ -20,6 +20,7 @@ from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry, build_registry
 from app.router.retry import RetryPolicy
 from app.router.router import Router
+from app.routing.score import ComplexityWeights
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,12 @@ RegistryFactory = Callable[[httpx.AsyncClient], ModelRegistry]
 def default_registry_factory(settings: Settings) -> RegistryFactory:
     def factory(client: httpx.AsyncClient) -> ModelRegistry:
         config = load_config(settings.config_path, provider_environment())
-        return build_registry(config.models, client, config.fallbacks)
+        return build_registry(
+            config.models,
+            client,
+            config.fallbacks,
+            ComplexityWeights.from_overrides(config.complexity),
+        )
 
     return factory
 

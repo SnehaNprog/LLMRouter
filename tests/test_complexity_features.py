@@ -177,6 +177,55 @@ def test_code_from_earlier_in_the_conversation_still_counts() -> None:
     assert f.has_code  # "it" is code the user pasted two turns ago
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Write a Python function that checks if a number is prime.",
+        "Implement a binary search algorithm.",
+        "Can you create a script to rename these files?",
+        "Generate a SQL query for monthly revenue.",
+        "Build an endpoint that returns the current user.",
+        "write unit tests for the parser",
+        "Port this to Rust",
+        "Convert the loop using python",
+    ],
+)
+def test_requests_for_code_are_recognised_even_when_none_is_pasted(text: str) -> None:
+    f = features(text)
+
+    assert f.code_request
+    assert not f.has_code  # nothing was pasted: this is the case the flag exists for
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Write a poem about autumn.",
+        "What is a function in mathematics?",
+        "Tell me about the Python snake.",
+        "Create a meal plan for the week.",
+        "Explain how algorithms are taught.",
+        "hello",
+    ],
+)
+def test_ordinary_requests_are_not_code_requests(text: str) -> None:
+    assert not features(text).code_request
+
+
+def test_only_the_final_turn_decides_whether_code_is_being_requested() -> None:
+    f = extract_features(
+        req(
+            messages=[
+                {"role": "user", "content": "Write a Python function to sort a list."},
+                {"role": "assistant", "content": "Here you go."},
+                {"role": "user", "content": "thanks"},
+            ]
+        )
+    )
+
+    assert not f.code_request
+
+
 # ---------- maths ----------
 
 

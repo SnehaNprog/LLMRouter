@@ -61,6 +61,17 @@ _STRUCTURED_OUTPUT = re.compile(
     re.IGNORECASE,
 )
 
+# "Write a Python function that ...": asks for code without containing any.
+_CODE_REQUEST = re.compile(
+    r"\b(?:write|implement|create|generate|build|develop|code|port|convert|refactor|optimi[sz]e)\b"
+    r"[^.\n]{0,50}"
+    r"\b(?:function|script|program|class|method|query|regex|algorithm|endpoint|module|"
+    r"unit tests?|test cases?|"
+    r"(?:in|using|to|into) (?:python|javascript|typescript|java|rust|go|c\+\+|c#|"
+    r"sql|bash|php|ruby|kotlin|swift))\b",
+    re.IGNORECASE,
+)
+
 _LIST_ITEM = re.compile(r"^\s*(?:\d{1,2}[.)]|[-*•])\s+\S", re.MULTILINE)
 
 _SMALL_TALK = re.compile(
@@ -80,6 +91,7 @@ class ComplexityFeatures:
     turns: int  # user messages so far: how deep the conversation is
     code_blocks: int  # fenced ``` blocks
     code_line_ratio: float  # share of non-empty lines that look like code, 0 to 1
+    code_request: bool  # asks for code to be written, even if none is pasted
     math_signals: int  # equations, LaTeX, symbols and maths vocabulary
     reasoning_cues: int  # distinct phrases like "step by step", "trade-offs", "prove"
     constraint_cues: int  # distinct phrases like "must", "exactly", "do not"
@@ -176,6 +188,7 @@ def extract_features(request: ChatCompletionRequest) -> ComplexityFeatures:
         turns=sum(1 for m in messages if m.role == "user"),
         code_blocks=blocks,
         code_line_ratio=round(code_ratio, 4),
+        code_request=bool(_CODE_REQUEST.search(scanned_last_user)),
         math_signals=_math_signals(recent),
         reasoning_cues=_distinct(_REASONING_CUES, scanned_last_user),
         constraint_cues=_distinct(_CONSTRAINT_CUES, scanned_last_user),

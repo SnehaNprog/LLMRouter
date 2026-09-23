@@ -1,13 +1,23 @@
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictFloat,
+    StrictInt,
+    ValidationError,
+    field_validator,
+)
 
 from app.core.tiers import Tier
+from app.routing.score import ComplexityWeights
 
 ENV_PREFIX = "os.environ/"
 
@@ -64,11 +74,21 @@ class ModelEntry(BaseModel):
         return None
 
 
+class RoutingSection(BaseModel):
+    """The optional ``routing:`` block: knobs for the smart router."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # How strongly each signal argues that a request is hard, 0 to 1 (see app/routing/score.py).
+    complexity: dict[str, StrictInt | StrictFloat] = Field(default_factory=dict)
+
+
 class ModelsFile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     models: list[ModelEntry] = Field(min_length=1)
     fallbacks: dict[str, list[str]] = Field(default_factory=dict)
+    routing: RoutingSection = Field(default_factory=RoutingSection)
 
 
 @dataclass(frozen=True)
@@ -95,6 +115,8 @@ class ModelsConfig:
     models: list[ModelConfig]
     # alias -> aliases to try, in order, once every retry on it has failed
     fallbacks: dict[str, tuple[str, ...]]
+    # overrides for the complexity signal strengths (validated; see app/routing/score.py)
+    complexity: dict[str, float] = field(default_factory=dict)
 
 
 def _tier_name(tier: Tier | None) -> str:
@@ -171,6 +193,10 @@ def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsCon
         )
 
     problems.extend(tier_problems(configs))
+    problems.extend(
+        f"routing.complexity: {message}"
+        for message in ComplexityWeights.problems(parsed.routing.complexity)
+    )
     aliases = {config.name for config in configs}
     for source, targets in parsed.fallbacks.items():
         if source not in aliases:
@@ -185,7 +211,8 @@ def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsCon
     if problems:
         raise ConfigError("invalid model config:\n  - " + "\n  - ".join(problems))
     fallbacks = {source: tuple(targets) for source, targets in parsed.fallbacks.items()}
-    return ModelsConfig(models=configs, fallbacks=fallbacks)
+    complexity = {name: float(value) for name, value in parsed.routing.complexity.items()}
+    return ModelsConfig(models=configs, fallbacks=fallbacks, complexity=complexity)
 
 
 def parse_models(raw: object, env: Mapping[str, str] | None = None) -> list[ModelConfig]:

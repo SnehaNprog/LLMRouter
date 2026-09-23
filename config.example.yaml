@@ -44,3 +44,12 @@ models:
 # When every retry on a model has failed, try these next (transitively, each model once).
 fallbacks:
   fast: [smart]
+
+# Optional: tune how request complexity is judged for smart routing (see app/routing/score.py).
+# Each number says how strongly a signal argues that a request is hard, from 0 (ignore it) to 1;
+# signals you leave out keep their defaults. small_talk_factor scales down greetings and thanks.
+# routing:
+#   complexity:
+#     reasoning: 0.6
+#     code: 0.5
+#     small_talk_factor: 0.2
