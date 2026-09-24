@@ -53,3 +53,12 @@ fallbacks:
 #     reasoning: 0.6
 #     code: 0.5
 #     small_talk_factor: 0.2
+#   # The highest complexity (0 to 1) each tier is trusted with. Above mid, only a frontier model.
+#   tier_ceilings:
+#     slm: 0.30
+#     mid: 0.60
+#   # Among models that are strong enough, how much price matters against speed.
+#   objective:
+#     cost: 0.8
+#     latency: 0.2
+#   expected_completion_tokens: 400  # assumed answer length when a request sets no max_tokens

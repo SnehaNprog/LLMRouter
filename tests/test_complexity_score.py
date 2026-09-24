@@ -552,3 +552,7 @@ def test_the_commented_example_in_the_shipped_config_is_valid_when_enabled(tmp_p
 
     assert loaded.complexity["reasoning"] == 0.6
     assert loaded.complexity["small_talk_factor"] == 0.2
+    # ... and so is the rest of the routing block: the tier ceilings and the objective
+    assert (loaded.policy.slm_ceiling, loaded.policy.mid_ceiling) == (0.30, 0.60)
+    assert (loaded.policy.cost_weight, loaded.policy.latency_weight) == (0.8, 0.2)
+    assert loaded.policy.expected_completion_tokens == 400

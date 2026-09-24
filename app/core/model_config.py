@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from app.core.tiers import Tier
+from app.routing.policy import RoutingPolicy
 from app.routing.score import ComplexityWeights
 
 ENV_PREFIX = "os.environ/"
@@ -81,6 +82,16 @@ class RoutingSection(BaseModel):
 
     # How strongly each signal argues that a request is hard, 0 to 1 (see app/routing/score.py).
     complexity: dict[str, StrictInt | StrictFloat] = Field(default_factory=dict)
+    # The highest complexity each tier handles: at or below slm, a small model will do; at or
+    # below mid, a mid-tier one; above that, only a frontier model.
+    tier_ceilings: dict[Literal["slm", "mid"], StrictInt | StrictFloat] = Field(
+        default_factory=dict
+    )
+    # How much the price and the speed of an answer matter when choosing between candidates.
+    objective: dict[Literal["cost", "latency"], StrictInt | StrictFloat] = Field(
+        default_factory=dict
+    )
+    expected_completion_tokens: StrictInt | None = None
 
 
 class ModelsFile(BaseModel):
@@ -117,6 +128,7 @@ class ModelsConfig:
     fallbacks: dict[str, tuple[str, ...]]
     # overrides for the complexity signal strengths (validated; see app/routing/score.py)
     complexity: dict[str, float] = field(default_factory=dict)
+    policy: RoutingPolicy = field(default_factory=RoutingPolicy)  # how scores pick models
 
 
 def _tier_name(tier: Tier | None) -> str:
@@ -197,6 +209,14 @@ def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsCon
         f"routing.complexity: {message}"
         for message in ComplexityWeights.problems(parsed.routing.complexity)
     )
+    policy_overrides: dict[str, Any] = {}
+    for tier_name, ceiling in parsed.routing.tier_ceilings.items():
+        policy_overrides[f"{tier_name}_ceiling"] = ceiling
+    for goal, weight in parsed.routing.objective.items():
+        policy_overrides[f"{goal}_weight"] = weight
+    if parsed.routing.expected_completion_tokens is not None:
+        policy_overrides["expected_completion_tokens"] = parsed.routing.expected_completion_tokens
+    problems.extend(f"routing: {message}" for message in RoutingPolicy.problems(policy_overrides))
     aliases = {config.name for config in configs}
     for source, targets in parsed.fallbacks.items():
         if source not in aliases:
@@ -212,7 +232,8 @@ def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsCon
         raise ConfigError("invalid model config:\n  - " + "\n  - ".join(problems))
     fallbacks = {source: tuple(targets) for source, targets in parsed.fallbacks.items()}
     complexity = {name: float(value) for name, value in parsed.routing.complexity.items()}
-    return ModelsConfig(models=configs, fallbacks=fallbacks, complexity=complexity)
+    policy = RoutingPolicy.from_overrides(policy_overrides)
+    return ModelsConfig(models=configs, fallbacks=fallbacks, complexity=complexity, policy=policy)
 
 
 def parse_models(raw: object, env: Mapping[str, str] | None = None) -> list[ModelConfig]:

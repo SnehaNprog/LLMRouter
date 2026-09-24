@@ -35,6 +35,7 @@ def default_registry_factory(settings: Settings) -> RegistryFactory:
             client,
             config.fallbacks,
             ComplexityWeights.from_overrides(config.complexity),
+            config.policy,
         )
 
     return factory
