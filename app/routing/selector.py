@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 from app.core.tiers import Tier
 from app.router.context import fits
@@ -16,6 +17,19 @@ from app.schemas.chat import ChatCompletionRequest
 class NoRoutableModelError(Exception):
     """Smart routing has no model it could send this request to."""
 
+    def __init__(
+        self,
+        message: str,
+        kind: Literal["no_tiers", "not_allowed", "context"],
+        *,
+        window: int = 0,
+        required: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.window = window  # for "context": the largest window any routable model has
+        self.required = required  # for "context": the tokens the request needs
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -24,7 +38,7 @@ class Candidate:
     expected_cost_usd: float
     expected_latency_s: float
     latency_measured: bool  # False when any of its deployments is still on the tier's default
-    utility: float  # lower is better: the weighted, normalised cost and latency
+    utility: float  # lower is better: weighted cost (relative) and latency (absolute), 0 to 1
 
 
 @dataclass(frozen=True)
@@ -99,17 +113,23 @@ def choose_model(
 
     tiered = [(alias, tier) for tier, names in registry.tiers().items() for alias in names]
     if not tiered:
-        raise NoRoutableModelError("no model has a tier, so there is nothing to route between")
+        raise NoRoutableModelError(
+            "no model has a tier, so there is nothing to route between", "no_tiers"
+        )
     allowed = [(a, t) for a, t in tiered if allow is None or allow(a)]
     if not allowed:
-        raise NoRoutableModelError("this key may not use any of the routable models")
+        raise NoRoutableModelError("this key may not use any of the routable models", "not_allowed")
     usable = [
         (a, t) for a, t in allowed if any(fits(d, prompt + completion) for d in registry.get(a))
     ]
     if not usable:
         needed = prompt + completion
+        largest = max(d.context_window or 0 for a, _ in allowed for d in registry.get(a))
         raise NoRoutableModelError(
-            f"the request (about {needed} tokens) fits no routable model's context window"
+            f"the request (about {needed} tokens) fits no routable model's context window",
+            "context",
+            window=largest,
+            required=needed,
         )
 
     eligible = [(a, t) for a, t in usable if t >= required]
@@ -125,13 +145,16 @@ def choose_model(
         seconds, measured = _expected_latency(deployments, tier, latency, policy)
         raw.append((alias, tier, cost, seconds, measured, position))
 
+    # Price is judged against the dearest candidate: spending twice as much is twice as bad.
+    # Speed is judged in absolute terms: a model 0.2 ms quicker than another is not better in any
+    # way that matters, however many times quicker that is, so seconds are squashed onto 0 to 1
+    # with a curve that is flat near zero and reaches 0.5 at ``latency_scale_seconds``.
     top_cost = max(cost for _, _, cost, _, _, _ in raw)
-    top_seconds = max(seconds for _, _, _, seconds, _, _ in raw)
     weight_sum = policy.cost_weight + policy.latency_weight
     ranked = []
     for alias, tier, cost, seconds, measured, position in raw:
         cost_share = cost / top_cost if top_cost > 0 else 0.0
-        latency_share = seconds / top_seconds if top_seconds > 0 else 0.0
+        latency_share = seconds / (seconds + policy.latency_scale_seconds)
         utility = (
             policy.cost_weight * cost_share + policy.latency_weight * latency_share
         ) / weight_sum

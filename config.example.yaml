@@ -62,3 +62,4 @@ fallbacks:
 #     cost: 0.8
 #     latency: 0.2
 #   expected_completion_tokens: 400  # assumed answer length when a request sets no max_tokens
+#   latency_scale_seconds: 2  # slowness counts for half its weight at this many seconds

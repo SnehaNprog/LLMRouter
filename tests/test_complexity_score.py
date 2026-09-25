@@ -556,3 +556,4 @@ def test_the_commented_example_in_the_shipped_config_is_valid_when_enabled(tmp_p
     assert (loaded.policy.slm_ceiling, loaded.policy.mid_ceiling) == (0.30, 0.60)
     assert (loaded.policy.cost_weight, loaded.policy.latency_weight) == (0.8, 0.2)
     assert loaded.policy.expected_completion_tokens == 400
+    assert loaded.policy.latency_scale_seconds == 2

@@ -17,7 +17,7 @@ from pydantic import (
 )
 
 from app.core.tiers import Tier
-from app.routing.policy import RoutingPolicy
+from app.routing.policy import AUTO_MODEL, RoutingPolicy
 from app.routing.score import ComplexityWeights
 
 ENV_PREFIX = "os.environ/"
@@ -92,6 +92,8 @@ class RoutingSection(BaseModel):
         default_factory=dict
     )
     expected_completion_tokens: StrictInt | None = None
+    # Seconds at which slowness counts for half its weight when choosing between models.
+    latency_scale_seconds: StrictInt | StrictFloat | None = None
 
 
 class ModelsFile(BaseModel):
@@ -204,6 +206,11 @@ def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsCon
             )
         )
 
+    problems.extend(
+        f"models[{index}]: '{AUTO_MODEL}' is reserved for smart routing; pick another name"
+        for index, config in enumerate(configs)
+        if config.name == AUTO_MODEL
+    )
     problems.extend(tier_problems(configs))
     problems.extend(
         f"routing.complexity: {message}"
@@ -214,6 +221,8 @@ def parse_config(raw: object, env: Mapping[str, str] | None = None) -> ModelsCon
         policy_overrides[f"{tier_name}_ceiling"] = ceiling
     for goal, weight in parsed.routing.objective.items():
         policy_overrides[f"{goal}_weight"] = weight
+    if parsed.routing.latency_scale_seconds is not None:
+        policy_overrides["latency_scale_seconds"] = parsed.routing.latency_scale_seconds
     if parsed.routing.expected_completion_tokens is not None:
         policy_overrides["expected_completion_tokens"] = parsed.routing.expected_completion_tokens
     problems.extend(f"routing: {message}" for message in RoutingPolicy.problems(policy_overrides))

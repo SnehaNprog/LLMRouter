@@ -5,6 +5,9 @@ from typing import Any
 from app.core.tiers import Tier
 from app.schemas.chat import ChatCompletionRequest
 
+# The model name that asks the gateway to choose the model. No configured model may use it.
+AUTO_MODEL = "auto"
+
 # What a model of each tier is assumed to take, in seconds, until it has been measured.
 _LATENCY_PRIORS = {Tier.SLM: 0.6, Tier.MID: 1.5, Tier.FRONTIER: 3.0}
 _COMPLETION_CAP = 4_000  # keep one enormous max_tokens from dominating the cost comparison
@@ -19,6 +22,8 @@ class RoutingPolicy:
     cost_weight: float = 0.7  # how much the price of an answer matters ...
     latency_weight: float = 0.3  # ... against how long it takes
     expected_completion_tokens: int = 300  # assumed answer length when max_tokens is not set
+    # Latency counts for half its weight at this many seconds, and more beyond (see the selector).
+    latency_scale_seconds: float = 3.0
     latency_priors: Mapping[Tier, float] = field(default_factory=lambda: dict(_LATENCY_PRIORS))
 
     @staticmethod
@@ -39,6 +44,9 @@ class RoutingPolicy:
         latency = overrides.get("latency_weight", RoutingPolicy.latency_weight)
         if cost + latency <= 0:
             problems.append("cost_weight and latency_weight cannot both be zero")
+        scale = overrides.get("latency_scale_seconds")
+        if scale is not None and not scale > 0:
+            problems.append(f"latency_scale_seconds: must be above 0, not {scale}")
         tokens = overrides.get("expected_completion_tokens")
         if tokens is not None and tokens < 1:
             problems.append(f"expected_completion_tokens: must be at least 1, not {tokens}")

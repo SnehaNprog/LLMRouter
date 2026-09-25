@@ -19,6 +19,7 @@ from app.quota.limiter import RateLimiter
 from app.quota.quota import RequestQuota, reserve_request_quota
 from app.router.router import Router, Served
 from app.router.tokens import estimate_text_tokens
+from app.routing.resolve import resolve_model
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse
 from app.schemas.error import ErrorResponse
@@ -117,6 +118,10 @@ async def create_chat_completion(
     # Checked before the model is looked up, so a key learns nothing about models it may not use.
     if not model_allowed(auth.allowed_models, request.model):
         raise ModelNotAllowedError(request.model)
+
+    # "auto" is replaced by the model the smart router picks, before anything is priced or
+    # reserved, so quotas, retries and fallbacks all see an ordinary request for that model.
+    request, _ = resolve_model(request, gateway.registry, gateway.latency)
 
     # Set aside the tokens and money this request is expected to need; settled below.
     quota = await reserve_request_quota(limiter, budgets, auth, request, gateway.registry)

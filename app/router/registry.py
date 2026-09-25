@@ -6,7 +6,7 @@ from app.core.model_config import ConfigError, ModelConfig, tier_problems
 from app.core.tiers import TIERS, Tier
 from app.providers.factory import build_provider
 from app.router.deployment import Deployment
-from app.routing.policy import DEFAULT_POLICY, RoutingPolicy
+from app.routing.policy import AUTO_MODEL, DEFAULT_POLICY, RoutingPolicy
 from app.routing.score import DEFAULT_WEIGHTS, ComplexityWeights
 
 
@@ -32,6 +32,8 @@ class ModelRegistry:
         self.complexity_weights = complexity_weights or DEFAULT_WEIGHTS
         self.routing_policy = routing_policy or DEFAULT_POLICY
         deployments = list(deployments)
+        if any(d.alias == AUTO_MODEL for d in deployments):
+            raise ConfigError(f"'{AUTO_MODEL}' is reserved for smart routing; pick another name")
         if problems := tier_problems([d.config for d in deployments]):
             raise ConfigError("inconsistent tiers:\n  - " + "\n  - ".join(problems))
         by_alias: dict[str, list[Deployment]] = {}

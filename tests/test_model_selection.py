@@ -120,6 +120,8 @@ def test_the_assumed_answer_length_follows_max_tokens_within_reason() -> None:
         ({"cost_weight": -1}, "cost_weight: must not be negative"),
         ({"cost_weight": 0, "latency_weight": 0}, "cannot both be zero"),
         ({"expected_completion_tokens": 0}, "expected_completion_tokens: must be at least 1"),
+        ({"latency_scale_seconds": 0}, "latency_scale_seconds: must be above 0"),
+        ({"latency_scale_seconds": -2}, "latency_scale_seconds: must be above 0"),
     ],
 )
 def test_nonsense_policies_are_rejected_clearly(overrides: dict[str, Any], message: str) -> None:
@@ -329,9 +331,55 @@ def test_a_lone_candidate_has_nothing_to_be_compared_with() -> None:
 
     assert choice.alias == "only"
     assert len(choice.candidates) == 1
-    assert choice.candidates[0].utility == pytest.approx(
-        1.0
-    )  # utilities are relative: it is the max
+    # Its price is the dearest on offer (itself), and a model of this tier is assumed to take
+    # 0.6 s against a 3 s scale: 0.7 * 1 + 0.3 * (0.6 / 3.6).
+    assert choice.candidates[0].utility == pytest.approx(0.75)
+
+
+def test_negligible_latency_differences_never_override_a_real_price_difference() -> None:
+    """0.2 ms against 0.4 ms is twice as fast, and it makes no practical difference."""
+    registry = ModelRegistry(
+        [dep("thrifty", Tier.SLM, 0.05, 0.08), dep("dear", Tier.MID, 3.0, 15.0)]
+    )
+    tracker = timed(registry, thrifty=0.0004, dear=0.0002)
+
+    assert choose(registry, 0.0, latency=tracker).alias == "thrifty"
+
+
+def test_differences_that_matter_in_seconds_do_count() -> None:
+    registry = ModelRegistry(
+        [dep("thrifty", Tier.SLM, 0.05, 0.08), dep("dear", Tier.SLM, 0.06, 0.09)]
+    )
+    tracker = timed(registry, thrifty=30.0, dear=0.5)  # half a minute against half a second
+
+    assert choose(registry, 0.0, latency=tracker).alias == "dear"
+
+
+def test_the_latency_penalty_depends_on_the_seconds_not_on_the_rivals() -> None:
+    fast_rivals = ModelRegistry([dep("a", Tier.SLM, 1, 1), dep("b", Tier.SLM, 1, 1)])
+    slow_rivals = ModelRegistry([dep("a", Tier.SLM, 1, 1), dep("b", Tier.SLM, 1, 1)])
+
+    with_fast = choose(fast_rivals, 0.0, latency=timed(fast_rivals, a=1.0, b=0.001)).candidates
+    with_slow = choose(slow_rivals, 0.0, latency=timed(slow_rivals, a=1.0, b=500.0)).candidates
+
+    def utility_of_a(candidates: list[Any]) -> float:
+        return float(next(c.utility for c in candidates if c.alias == "a"))
+
+    assert utility_of_a(with_fast) == pytest.approx(
+        utility_of_a(with_slow)
+    )  # a's 1 s costs the same
+
+
+def test_the_latency_scale_sets_how_much_a_second_hurts() -> None:
+    registry = ModelRegistry([dep("a", Tier.SLM, 1, 1)])
+    tracker = timed(registry, a=2.0)
+    lenient = RoutingPolicy.from_overrides({"latency_scale_seconds": 20.0})
+    strict = RoutingPolicy.from_overrides({"latency_scale_seconds": 0.5})
+
+    lenient_utility = choose(registry, 0.0, latency=tracker, policy=lenient).candidates[0].utility
+    strict_utility = choose(registry, 0.0, latency=tracker, policy=strict).candidates[0].utility
+
+    assert strict_utility > lenient_utility
 
 
 # ---------- limits on what may be chosen ----------
@@ -532,6 +580,7 @@ def test_the_routing_policy_is_read_from_the_config() -> None:
             tier_ceilings={"slm": 0.2, "mid": 0.5},
             objective={"cost": 0.9, "latency": 0.1},
             expected_completion_tokens=500,
+            latency_scale_seconds=1.5,
         ),
         {},
     )
@@ -540,6 +589,7 @@ def test_the_routing_policy_is_read_from_the_config() -> None:
     assert (policy.slm_ceiling, policy.mid_ceiling) == (0.2, 0.5)
     assert (policy.cost_weight, policy.latency_weight) == (0.9, 0.1)
     assert policy.expected_completion_tokens == 500
+    assert policy.latency_scale_seconds == 1.5
 
 
 def test_a_partly_configured_policy_keeps_the_other_defaults() -> None:
@@ -561,6 +611,8 @@ def test_a_partly_configured_policy_keeps_the_other_defaults() -> None:
         ({"objective": {"speed": 1}}, r"routing\.objective"),
         ({"expected_completion_tokens": 0}, "expected_completion_tokens: must be at least 1"),
         ({"expected_completion_tokens": "lots"}, r"routing\.expected_completion_tokens"),
+        ({"latency_scale_seconds": 0}, "latency_scale_seconds: must be above 0"),
+        ({"latency_scale_seconds": "slow"}, r"routing\.latency_scale_seconds"),
     ],
 )
 def test_bad_routing_policies_stop_startup_with_a_clear_message(
