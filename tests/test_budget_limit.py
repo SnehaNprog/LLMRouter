@@ -176,8 +176,11 @@ async def test_free_models_reserve_nothing_even_under_a_budget(
 
     reservation = await limiter.reserve(auth(key_budget=1.0), request(), free, 8)
 
-    assert reservation is NO_RESERVATION
-    assert await store.spent("key:key-1:2026-11") == 0
+    assert reservation.reserved == 0
+    assert await store.spent("key:key-1:2026-11") == 0  # nothing was charged
+    # ... but it is a real reservation, so a move to a priced model can still be paid for.
+    assert await reservation.ensure(RESERVED) is True
+    assert await store.spent("key:key-1:2026-11") == RESERVED
 
 
 async def test_a_reservation_is_charged_up_front(

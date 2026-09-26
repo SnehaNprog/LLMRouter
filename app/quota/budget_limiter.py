@@ -1,6 +1,6 @@
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -84,7 +84,17 @@ class BudgetLimiter:
         Which deployment answers is only decided by the router (retries and fallbacks included),
         so the estimate assumes the priciest model in the request's fallback chain.
         """
-        deployments = [d for name in registry.chain(request.model) for d in registry.get(name)]
+        return self.estimate_for(registry, request, prompt_tokens, registry.chain(request.model))
+
+    def estimate_for(
+        self,
+        registry: ModelRegistry,
+        request: ChatCompletionRequest,
+        prompt_tokens: int,
+        aliases: Sequence[str],
+    ) -> int:
+        """The most this request could cost, in nano-dollars, if any of ``aliases`` served it."""
+        deployments = [d for name in aliases for d in registry.get(name)]
         dearest_in = max(d.config.input_cost_per_mtok for d in deployments)
         dearest_out = max(d.config.output_cost_per_mtok for d in deployments)
         completion = (request.max_tokens or self._completion_reserve) * max(1, request.n)
@@ -108,17 +118,18 @@ class BudgetLimiter:
         if not counters:
             return NO_RESERVATION
         needed = self.estimate_cost(registry, request, prompt_tokens)
-        if needed == 0:
-            return NO_RESERVATION  # free models cannot overspend anything
-        result = await self._guard.enforce(
-            lambda: self._store.spend(counters, needed), None, what="budget limiting"
-        )
-        if result is None:
-            return NO_RESERVATION  # Redis is unavailable and the policy is to fail open
-        if not result.allowed:
-            blocked = next(c for c in counters if c.name == result.blocked_by)
-            scope: Literal["key", "tenant"] = "key" if blocked.name.startswith("key:") else "tenant"
-            raise BudgetExceededError(scope, blocked.limit, seconds_until_next_month(now))
+        if needed > 0:  # free models cannot overspend anything, so they reserve nothing
+            result = await self._guard.enforce(
+                lambda: self._store.spend(counters, needed), None, what="budget limiting"
+            )
+            if result is None:
+                return NO_RESERVATION  # Redis is unavailable and the policy is to fail open
+            if not result.allowed:
+                blocked = next(c for c in counters if c.name == result.blocked_by)
+                scope: Literal["key", "tenant"] = (
+                    "key" if blocked.name.startswith("key:") else "tenant"
+                )
+                raise BudgetExceededError(scope, blocked.limit, seconds_until_next_month(now))
 
         async def adjust(delta: int) -> int | None:
             # The reservation was charged up front; settling corrects it to the real cost.
@@ -127,4 +138,11 @@ class BudgetLimiter:
             )
             return None
 
-        return Reservation(needed, 0, adjust)
+        async def grow(extra: int) -> bool:
+            # Moving to a dearer model: set aside the difference now, or say there is no room.
+            result = await self._guard.enforce(
+                lambda: self._store.spend(counters, extra), None, what="budget limiting"
+            )
+            return True if result is None else result.allowed
+
+        return Reservation(needed, 0, adjust, grow=grow)

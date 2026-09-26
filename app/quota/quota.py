@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.auth.dependencies import AuthContext
@@ -19,6 +20,7 @@ class RequestQuota:
     tokens: Reservation
     budget: Reservation
     prompt_tokens: int  # our estimate of the prompt, for settling responses that report no usage
+    price_of: Callable[[str], int] | None = None  # worst-case cost in nano-dollars of a model
 
     async def settle(
         self, *, prompt_tokens: int, completion_tokens: int, deployment: Deployment | None
@@ -29,6 +31,17 @@ class RequestQuota:
             price = deployment.cost(prompt_tokens, completion_tokens)
             await self.budget.settle(cost_nano(price))
         # Without knowing which deployment answered, the budget keeps the (pessimistic) estimate.
+
+    async def admit(self, alias: str) -> bool:
+        """May this request be sent to ``alias``? That model may cost more than what was reserved.
+
+        The budget is topped up to cover the worst case of the new model, atomically; if the key
+        or its organisation cannot afford that, the model is ruled out and the request is left
+        as it was.
+        """
+        if self.price_of is None:
+            return True
+        return await self.budget.ensure(self.price_of(alias))
 
     async def release(self) -> None:
         """The request produced nothing: give everything back."""
@@ -51,4 +64,8 @@ async def reserve_request_quota(
     except BaseException:
         await asyncio.shield(tokens.release())
         raise
-    return RequestQuota(tokens, budget, prompt_tokens)
+
+    def price_of(alias: str) -> int:
+        return budgets.estimate_for(registry, request, prompt_tokens, [alias])
+
+    return RequestQuota(tokens, budget, prompt_tokens, price_of)

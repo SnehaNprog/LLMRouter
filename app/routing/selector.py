@@ -54,6 +54,18 @@ class RoutingChoice:
         return self.candidates[0].tier
 
     @property
+    def escalation(self) -> list[str]:
+        """Where to go if the chosen model fails: other candidates, strongest ranking first.
+
+        Models at least as strong as the chosen one come first, in ranked order. Weaker ones that
+        still meet the bar come last, as a final resort: a plainer answer beats an error.
+        """
+        rest = self.candidates[1:]
+        stronger = [c.alias for c in rest if c.tier >= self.tier]
+        weaker = [c.alias for c in rest if c.tier < self.tier]
+        return stronger + weaker
+
+    @property
     def reasons(self) -> list[str]:
         """A short, human-readable account of the decision, for logs."""
         top = ", ".join(self.complexity.top(3)) or "nothing in particular"

@@ -14,10 +14,12 @@ class Reservation:
         prompt_tokens: int,
         adjust: Callable[[int], Awaitable[int | None]] | None,
         balance: int | None = None,
+        grow: Callable[[int], Awaitable[bool]] | None = None,
     ) -> None:
         self.reserved = reserved
         self.prompt_tokens = prompt_tokens  # token reservations only: our estimate of the prompt
         self._adjust = adjust
+        self._grow = grow
         self.balance = balance  # what the allowance had left, as of the last time we looked
         self._settled = False
 
@@ -31,6 +33,19 @@ class Reservation:
             balance = await self._adjust(delta)
             if balance is not None:
                 self.balance = balance
+
+    async def ensure(self, total: int) -> bool:
+        """Raise the reservation to at least ``total``. False if there is not enough to cover it.
+
+        Used when a request turns out to need more than was set aside, as when it is moved to
+        a dearer model after the first one failed.
+        """
+        if total <= self.reserved or self._grow is None:
+            return True
+        if not await self._grow(total - self.reserved):
+            return False
+        self.reserved = total
+        return True
 
     async def release(self) -> None:
         """The request used nothing (it failed before producing output): refund everything."""

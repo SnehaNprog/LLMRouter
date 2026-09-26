@@ -121,7 +121,8 @@ async def create_chat_completion(
 
     # "auto" is replaced by the model the smart router picks, before anything is priced or
     # reserved, so quotas, retries and fallbacks all see an ordinary request for that model.
-    request, _ = resolve_model(request, gateway.registry, gateway.latency)
+    request, choice = resolve_model(request, gateway.registry, gateway.latency)
+    escalation = choice.escalation if choice is not None else []
 
     # Set aside the tokens and money this request is expected to need; settled below.
     quota = await reserve_request_quota(limiter, budgets, auth, request, gateway.registry)
@@ -130,7 +131,9 @@ async def create_chat_completion(
     served = Served()
     try:
         if not request.stream:
-            completion = await gateway.complete(request, served)
+            completion = await gateway.complete(
+                request, served, escalation=escalation, admit=quota.admit
+            )
             prompt, generated = _usage_of(completion, quota)
             await quota.settle(
                 prompt_tokens=prompt, completion_tokens=generated, deployment=served.deployment
@@ -138,7 +141,7 @@ async def create_chat_completion(
             rate.tokens = limiter.token_window(auth, quota.tokens)  # now net of the real usage
             return JSONResponse(completion.model_dump(exclude_none=True), headers=rate.as_headers())
 
-        stream = gateway.stream(request, served)
+        stream = gateway.stream(request, served, escalation=escalation, admit=quota.admit)
         # Pull the first chunk before answering so upstream failures still become proper HTTP
         # errors.
         try:

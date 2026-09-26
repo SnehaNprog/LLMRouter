@@ -18,6 +18,7 @@ from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse, 
 logger = logging.getLogger(__name__)
 
 Sleep = Callable[[float], Awaitable[None]]
+Admit = Callable[[str], Awaitable[bool]]
 
 
 @dataclass
@@ -115,17 +116,29 @@ class Router:
         self,
         request: ChatCompletionRequest,
         run: Callable[[Sequence[Deployment]], Awaitable[T]],
+        escalation: Sequence[str] = (),
+        admit: Admit | None = None,
     ) -> T:
         """Run ``run`` on the request's alias, then on its fallbacks, until one succeeds.
+
+        After those, the ``escalation`` models are tried in order (each with its own fallbacks).
+        ``admit`` is asked before each of them whether the request may go there, and a model it
+        refuses is skipped.
 
         Deployments whose context window cannot hold the request are skipped; an alias with
         none left is passed over without being called.
         """
         required = estimate_prompt_tokens(request) + (request.max_tokens or 0)
         chain = self.registry.chain(request.model)
+        configured = len(chain)
+        for alias in escalation:
+            chain.extend(name for name in self.registry.chain(alias) if name not in chain)
         last_error: Exception | None = None
         largest_window = 0
         for position, name in enumerate(chain):
+            if position >= configured and admit is not None and not await admit(name):
+                logger.info("escalation target skipped, not admitted", extra={"model": name})
+                continue
             available = self.registry.get(name)
             candidates = [d for d in available if fits(d, required)]
             if not candidates:
@@ -170,7 +183,12 @@ class Router:
         )
 
     async def complete(
-        self, request: ChatCompletionRequest, served: Served | None = None
+        self,
+        request: ChatCompletionRequest,
+        served: Served | None = None,
+        *,
+        escalation: Sequence[str] = (),
+        admit: Admit | None = None,
     ) -> ChatCompletionResponse:
         async def attempt(
             deployment: Deployment,
@@ -185,21 +203,30 @@ class Router:
         ) -> tuple[Deployment, ChatCompletionResponse]:
             return await self._with_retries(deployments, attempt)
 
-        deployment, response = await self._across_fallbacks(request, run)
+        deployment, response = await self._across_fallbacks(request, run, escalation, admit)
         if served is not None:
             served.deployment = deployment
         self._log_completion(deployment, response.usage)
         return response
 
     def stream(
-        self, request: ChatCompletionRequest, served: Served | None = None
+        self,
+        request: ChatCompletionRequest,
+        served: Served | None = None,
+        *,
+        escalation: Sequence[str] = (),
+        admit: Admit | None = None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         # Unknown aliases raise here, before any iteration, so the API can answer with a 404.
         self.registry.get(request.model)
-        return self._stream(request, served)
+        return self._stream(request, served, escalation, admit)
 
     async def _stream(
-        self, request: ChatCompletionRequest, served: Served | None
+        self,
+        request: ChatCompletionRequest,
+        served: Served | None,
+        escalation: Sequence[str],
+        admit: Admit | None,
     ) -> AsyncIterator[ChatCompletionChunk]:
         opened = tuple[Deployment, ChatCompletionChunk | None, AsyncIterator[ChatCompletionChunk]]
 
@@ -219,7 +246,7 @@ class Router:
 
         # Only failures before the first chunk are retried or fall back; once output has
         # started the client has seen it, so later errors propagate.
-        deployment, first, rest = await self._across_fallbacks(request, run)
+        deployment, first, rest = await self._across_fallbacks(request, run, escalation, admit)
         if served is not None:
             served.deployment = deployment
         if first is not None:
