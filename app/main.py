@@ -24,6 +24,7 @@ def create_app(
     app.add_middleware(RequestIdMiddleware)
     register_exception_handlers(app)
     app.state.readiness_checks = default_readiness_checks()
+    app.state.routing_headers = settings.routing_headers
     app.include_router(health_router)
     app.include_router(chat_router)
     app.include_router(models_router)

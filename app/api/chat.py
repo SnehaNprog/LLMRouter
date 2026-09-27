@@ -19,7 +19,10 @@ from app.quota.limiter import RateLimiter
 from app.quota.quota import RequestQuota, reserve_request_quota
 from app.router.router import Router, Served
 from app.router.tokens import estimate_text_tokens
+from app.routing.explain import log_decision, log_outcome, routing_headers
+from app.routing.policy import AUTO_MODEL
 from app.routing.resolve import resolve_model
+from app.routing.selector import RoutingChoice
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse
 from app.schemas.error import ErrorResponse
@@ -97,6 +100,18 @@ async def _event_stream(
         )
 
 
+def _routing_headers(
+    http_request: Request, choice: RoutingChoice | None, served: Served, auth: AuthContext
+) -> dict[str, str]:
+    """Explain a smart-routed answer (and log which model finally served it)."""
+    if choice is None:
+        return {}
+    log_outcome(choice, served.deployment, tenant_id=auth.tenant_id, key_id=auth.key_id)
+    if not http_request.app.state.routing_headers:
+        return {}
+    return routing_headers(choice, served.deployment)
+
+
 def _usage_of(completion: ChatCompletionResponse, quota: RequestQuota) -> tuple[int, int]:
     if completion.usage is not None:
         return completion.usage.prompt_tokens, completion.usage.completion_tokens
@@ -123,6 +138,8 @@ async def create_chat_completion(
     # reserved, so quotas, retries and fallbacks all see an ordinary request for that model.
     request, choice = resolve_model(request, gateway.registry, gateway.latency)
     escalation = choice.escalation if choice is not None else []
+    if choice is not None:
+        log_decision(choice, requested=AUTO_MODEL, tenant_id=auth.tenant_id, key_id=auth.key_id)
 
     # Set aside the tokens and money this request is expected to need; settled below.
     quota = await reserve_request_quota(limiter, budgets, auth, request, gateway.registry)
@@ -139,7 +156,8 @@ async def create_chat_completion(
                 prompt_tokens=prompt, completion_tokens=generated, deployment=served.deployment
             )
             rate.tokens = limiter.token_window(auth, quota.tokens)  # now net of the real usage
-            return JSONResponse(completion.model_dump(exclude_none=True), headers=rate.as_headers())
+            headers = {**rate.as_headers(), **_routing_headers(http_request, choice, served, auth)}
+            return JSONResponse(completion.model_dump(exclude_none=True), headers=headers)
 
         stream = gateway.stream(request, served, escalation=escalation, admit=quota.admit)
         # Pull the first chunk before answering so upstream failures still become proper HTTP
@@ -156,5 +174,10 @@ async def create_chat_completion(
         media_type="text/event-stream",
         # The headers go out before the stream does, so the token figures are as of the
         # reservation; the final usage is settled once the stream ends.
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", **rate.as_headers()},
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            **rate.as_headers(),
+            **_routing_headers(http_request, choice, served, auth),
+        },
     )

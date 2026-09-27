@@ -87,14 +87,29 @@ def _expected_cost(deployments: list[Deployment], prompt: int, completion: int) 
 
 
 def _expected_latency(
-    deployments: list[Deployment], tier: Tier, latency: LatencyTracker, policy: RoutingPolicy
+    deployments: list[Deployment],
+    tier: Tier,
+    latency: LatencyTracker,
+    policy: RoutingPolicy,
+    fastest_measured: float | None,
 ) -> tuple[float, bool]:
+    """Expected seconds for a model, and whether every one of its deployments has been measured.
+
+    A deployment nobody has timed yet is assumed to take its tier's default, but never longer
+    than the fastest deployment that has been timed. Without that cap a model that has not been
+    measured could be rated slower than one that has, so it would never be chosen, so it would
+    never be measured: starved by its own lack of data. This way it gets tried, and from then on
+    it is judged by what it actually does.
+    """
+    assumed = policy.latency_priors[tier]
+    if fastest_measured is not None:
+        assumed = min(assumed, fastest_measured)
     total_weight = sum(d.weight for d in deployments)
     seconds, measured = 0.0, True
     for d in deployments:
         observed = latency.ewma(d.id)
         measured = measured and observed is not None
-        seconds += d.weight * (observed if observed is not None else policy.latency_priors[tier])
+        seconds += d.weight * (observed if observed is not None else assumed)
     return seconds / total_weight, measured
 
 
@@ -150,11 +165,19 @@ def choose_model(
         strongest = max(t for _, t in usable)
         eligible = [(a, t) for a, t in usable if t == strongest]
 
+    observed_seconds = [
+        seconds
+        for alias, _ in eligible
+        for d in registry.get(alias)
+        if (seconds := latency.ewma(d.id)) is not None
+    ]
+    fastest_measured = min(observed_seconds, default=None)
+
     raw = []
     for position, (alias, tier) in enumerate(eligible):
         deployments = [d for d in registry.get(alias) if fits(d, prompt + completion)]
         cost = _expected_cost(deployments, prompt, completion)
-        seconds, measured = _expected_latency(deployments, tier, latency, policy)
+        seconds, measured = _expected_latency(deployments, tier, latency, policy, fastest_measured)
         raw.append((alias, tier, cost, seconds, measured, position))
 
     # Price is judged against the dearest candidate: spending twice as much is twice as bad.

@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     quota_failure_mode: Literal["open", "closed"] = "open"
     quota_breaker_threshold: int = 3  # consecutive failures before Redis is left alone ...
     quota_breaker_cooldown: float = 5.0  # ... for this many seconds
+    # Explain each smart-routed answer in x-llmrouter-* response headers. The log always has it.
+    routing_headers: bool = True
     default_rpm_limit: int | None = None
     default_tpm_limit: int | None = None
     # Completion tokens assumed when a request sets no max_tokens; settled against real usage.

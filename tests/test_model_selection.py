@@ -318,6 +318,73 @@ def test_a_partly_measured_model_blends_data_and_default_by_weight() -> None:
     assert not candidate.latency_measured
 
 
+def test_a_measured_model_does_not_starve_a_cheaper_one_nobody_has_timed() -> None:
+    """The bug: 'middle' was timed at 0 s, 'cheap' never, so 'cheap' was assumed to take 0.6 s."""
+    registry = ModelRegistry(
+        [dep("cheap", Tier.SLM, 0.05, 0.08), dep("middle", Tier.MID, 0.6, 0.8)]
+    )
+    tracker = timed(registry, middle=0.0)
+
+    choice = choose(registry, 0.0, latency=tracker)
+
+    assert choice.alias == "cheap"  # it gets tried, instead of being ruled out for lack of data
+    unmeasured = next(c for c in choice.candidates if c.alias == "cheap")
+    assert not unmeasured.latency_measured
+    assert unmeasured.expected_latency_s == 0.0  # as fast as the fastest known, no slower
+
+
+def test_an_unmeasured_model_is_never_assumed_slower_than_the_fastest_measured_one() -> None:
+    registry = ModelRegistry([dep("a", Tier.FRONTIER), dep("b", Tier.FRONTIER), dep("c", Tier.MID)])
+    tracker = timed(registry, b=0.25)  # the tier default for frontier models is 3 s
+
+    candidates = {c.alias: c for c in choose(registry, 0.0, latency=tracker).candidates}
+
+    assert candidates["a"].expected_latency_s == pytest.approx(0.25)
+    assert candidates["c"].expected_latency_s == pytest.approx(0.25)
+    assert candidates["b"].expected_latency_s == pytest.approx(0.25)
+
+
+def test_the_tier_default_still_applies_when_it_is_the_faster_guess() -> None:
+    registry = ModelRegistry([dep("a", Tier.SLM), dep("b", Tier.FRONTIER)])
+    tracker = timed(registry, b=2.0)  # slower than the SLM default of 0.6 s
+
+    candidates = {c.alias: c for c in choose(registry, 0.0, latency=tracker).candidates}
+
+    assert candidates["a"].expected_latency_s == pytest.approx(0.6)  # not raised to 2 s
+
+
+def test_trying_an_unmeasured_model_corrects_a_wrong_guess() -> None:
+    """Optimism gets a model tried; once it is timed and found slow, it stops being chosen."""
+    registry = ModelRegistry(
+        [dep("cheap", Tier.SLM, 0.05, 0.08), dep("middle", Tier.MID, 0.6, 0.8)]
+    )
+    tracker = timed(registry, middle=0.0)
+    cares_about_speed = RoutingPolicy.from_overrides({"cost_weight": 0.1, "latency_weight": 0.9})
+    assert choose(registry, 0.0, latency=tracker, policy=cares_about_speed).alias == "cheap"
+
+    tracker.observe(registry.get("cheap")[0].id, 12.0)  # it turns out to be very slow
+
+    assert choose(registry, 0.0, latency=tracker, policy=cares_about_speed).alias == "middle"
+
+
+def test_by_default_price_outweighs_even_a_large_speed_difference() -> None:
+    """With the default 70/30 weights the dearest candidate always pays the whole price share."""
+    registry = ModelRegistry(
+        [dep("cheap", Tier.SLM, 0.05, 0.08), dep("middle", Tier.MID, 0.6, 0.8)]
+    )
+    tracker = timed(registry, cheap=12.0, middle=0.0)
+
+    assert choose(registry, 0.0, latency=tracker).alias == "cheap"
+
+
+def test_with_nothing_measured_the_tier_defaults_apply_as_before() -> None:
+    registry = ModelRegistry([dep("a", Tier.SLM), dep("b", Tier.MID), dep("c", Tier.FRONTIER)])
+
+    seconds = {c.alias: c.expected_latency_s for c in choose(registry, 0.0).candidates}
+
+    assert seconds == {"a": pytest.approx(0.6), "b": pytest.approx(1.5), "c": pytest.approx(3.0)}
+
+
 def test_a_slow_local_model_can_lose_to_a_quick_hosted_one() -> None:
     registry = ModelRegistry([dep("local", Tier.SLM), dep("hosted", Tier.SLM, 0.05, 0.08)])
     tracker = timed(registry, local=12.0, hosted=0.4)
