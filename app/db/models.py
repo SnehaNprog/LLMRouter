@@ -28,6 +28,9 @@ class Tenant(Base):
     is_active: Mapped[bool] = mapped_column(default=True)
     # Calendar-month spending cap for the whole organisation, in nano-dollars; NULL: no cap.
     monthly_budget_nano_usd: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    # Smart-routing policy for this organisation's "auto" requests; NULL means no restriction.
+    routing_pinned_model: Mapped[str | None] = mapped_column(String(200), default=None)
+    routing_max_tier: Mapped[str | None] = mapped_column(String(16), default=None)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     api_keys: Mapped[list["ApiKey"]] = relationship(

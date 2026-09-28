@@ -47,6 +47,8 @@ def auth(tpm_limit: int | None = 1_000) -> AuthContext:
         tpm_limit=tpm_limit,
         key_budget_nano=None,
         tenant_budget_nano=None,
+        pinned_model=None,
+        max_tier=None,
     )
 
 

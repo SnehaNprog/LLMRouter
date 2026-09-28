@@ -1,7 +1,7 @@
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import AuthContext, require_scope
@@ -23,7 +23,10 @@ from app.auth.tenants import (
     list_tenants,
     update_tenant,
 )
+from app.core.tiers import Tier
 from app.db.session import get_session
+from app.router.registry import ModelRegistry
+from app.routing.policy import AUTO_MODEL
 from app.schemas.admin import (
     KeyCreate,
     KeyList,
@@ -59,15 +62,50 @@ def _check_grantable(auth: AuthContext, scopes: list[str] | None) -> None:
             raise ScopeEscalationError(scope)
 
 
+def _check_routing_policy(
+    registry: ModelRegistry, pinned_model: str | None, max_tier: Tier | None
+) -> None:
+    """Refuse a policy that could never work, while the operator is there to fix it."""
+    if pinned_model is not None:
+        known = registry.aliases()
+        if pinned_model == AUTO_MODEL or pinned_model not in known:
+            raise HTTPException(
+                status_code=400,
+                detail=f"pinned_model '{pinned_model}' is not a configured model "
+                f"(known: {', '.join(known)})",
+            )
+        tier = registry.tier_of(pinned_model)
+        if max_tier is not None and tier is not None and tier > max_tier:
+            raise HTTPException(
+                status_code=400,
+                detail=f"pinned_model '{pinned_model}' is tier {tier.value}, "
+                f"above the max_tier of {max_tier.value}",
+            )
+    elif max_tier is not None and not any(t <= max_tier for t in registry.tiers()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"no configured model is at or below the tier {max_tier.value}, "
+            "so automatic routing would have nothing to use",
+        )
+
+
 # ---------------- tenants ----------------
 
 
 @tenants.post("", status_code=201)
 async def create_tenant_endpoint(
-    body: TenantCreate, session: Session, _: Annotated[AuthContext, Depends(tenant_admin)]
+    body: TenantCreate,
+    request: Request,
+    session: Session,
+    _: Annotated[AuthContext, Depends(tenant_admin)],
 ) -> TenantOut:
+    _check_routing_policy(request.app.state.registry, body.pinned_model, body.max_tier)
     try:
-        return TenantOut.of(await create_tenant(session, body.name, body.monthly_budget_usd))
+        return TenantOut.of(
+            await create_tenant(
+                session, body.name, body.monthly_budget_usd, body.pinned_model, body.max_tier
+            )
+        )
     except ValueError as exc:
         raise _bad_request(exc) from None
 
@@ -94,6 +132,7 @@ async def get_tenant_endpoint(
 async def update_tenant_endpoint(
     tenant_id: str,
     body: TenantUpdate,
+    request: Request,
     session: Session,
     auth: Annotated[AuthContext, Depends(tenant_admin)],
 ) -> TenantOut:
@@ -101,6 +140,16 @@ async def update_tenant_endpoint(
         raise AdminConflictError(
             "You cannot deactivate the tenant your own key belongs to.", "cannot_modify_own_tenant"
         )
+    changed = body.model_fields_set
+    if "pinned_model" in changed or "max_tier" in changed:
+        current = await get_tenant(session, tenant_id)
+        pinned = body.pinned_model if "pinned_model" in changed else current.routing_pinned_model
+        cap = (
+            body.max_tier
+            if "max_tier" in changed
+            else (None if current.routing_max_tier is None else Tier(current.routing_max_tier))
+        )
+        _check_routing_policy(request.app.state.registry, pinned, cap)
     try:
         return TenantOut.of(
             await update_tenant(
@@ -109,10 +158,10 @@ async def update_tenant_endpoint(
                 name=body.name,
                 is_active=body.is_active,
                 monthly_budget_usd=(
-                    body.monthly_budget_usd
-                    if "monthly_budget_usd" in body.model_fields_set
-                    else INHERIT
+                    body.monthly_budget_usd if "monthly_budget_usd" in changed else INHERIT
                 ),
+                pinned_model=body.pinned_model if "pinned_model" in changed else INHERIT,
+                max_tier=body.max_tier if "max_tier" in changed else INHERIT,
             )
         )
     except ValueError as exc:

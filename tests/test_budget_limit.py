@@ -50,6 +50,8 @@ def auth(
         tpm_limit=None,
         key_budget_nano=None if key_budget is None else usd_to_nano(key_budget),
         tenant_budget_nano=None if tenant_budget is None else usd_to_nano(tenant_budget),
+        pinned_model=None,
+        max_tier=None,
     )
 
 

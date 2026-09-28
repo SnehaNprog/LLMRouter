@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.tiers import Tier
 from app.db.models import ApiKey, Tenant
 from app.quota.budget import nano_to_usd
 
@@ -20,6 +21,8 @@ class TenantCreate(_Request):
     monthly_budget_usd: float | None = Field(
         default=None, ge=0.000001, le=1_000_000
     )  # default: no cap
+    pinned_model: str | None = Field(default=None, min_length=1, max_length=200)
+    max_tier: Tier | None = None
 
 
 class TenantUpdate(_Request):
@@ -28,6 +31,8 @@ class TenantUpdate(_Request):
     monthly_budget_usd: float | None = Field(
         default=None, ge=0.000001, le=1_000_000
     )  # omit to keep; null removes the cap
+    pinned_model: str | None = Field(default=None, min_length=1, max_length=200)  # omit to keep
+    max_tier: Tier | None = None  # omit to keep; null removes the cap
 
 
 class TenantOut(BaseModel):
@@ -35,6 +40,8 @@ class TenantOut(BaseModel):
     name: str
     is_active: bool
     monthly_budget_usd: float | None
+    pinned_model: str | None
+    max_tier: Tier | None
     created_at: datetime
 
     @classmethod
@@ -44,6 +51,8 @@ class TenantOut(BaseModel):
             name=tenant.name,
             is_active=tenant.is_active,
             monthly_budget_usd=_usd(tenant.monthly_budget_nano_usd),
+            pinned_model=tenant.routing_pinned_model,
+            max_tier=None if tenant.routing_max_tier is None else Tier(tenant.routing_max_tier),
             created_at=tenant.created_at,
         )
 

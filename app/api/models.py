@@ -26,7 +26,7 @@ async def list_models(
     "auto" is listed first whenever there are tiered models to route between.
     """
     aliases = list(gateway.registry.aliases())
-    if gateway.registry.tiers():
+    if gateway.registry.tiers() or auth.pinned_model:
         aliases.insert(0, AUTO_MODEL)
     return ModelList(
         data=[

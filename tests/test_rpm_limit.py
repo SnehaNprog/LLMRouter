@@ -38,6 +38,8 @@ def auth(key_id: str = "key-1", rpm_limit: int | None = None) -> AuthContext:
         tpm_limit=None,
         key_budget_nano=None,
         tenant_budget_nano=None,
+        pinned_model=None,
+        max_tier=None,
     )
 
 

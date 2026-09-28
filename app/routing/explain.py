@@ -24,14 +24,17 @@ def routing_headers(choice: RoutingChoice, served: Deployment | None) -> dict[st
     """
     answered = served.alias if served is not None else choice.alias
     tier = served.config.tier if served is not None else choice.tier
+    reason = "pinned" if choice.pinned else (",".join(choice.complexity.top(3)) or "none")
     headers = {
         "x-llmrouter-model": _clean(answered),
         "x-llmrouter-tier": tier.value if tier is not None else "none",
         "x-llmrouter-complexity": f"{choice.complexity.value:.2f}",
         "x-llmrouter-required-tier": choice.required_tier.value,
-        "x-llmrouter-reason": ",".join(choice.complexity.top(3)) or "none",
+        "x-llmrouter-reason": reason,
         "x-llmrouter-escalated": "true" if answered != choice.alias else "false",
     }
+    if choice.policy is not None:
+        headers["x-llmrouter-policy"] = _clean(choice.policy)  # the organisation's policy applied
     if not choice.clears_bar:
         headers["x-llmrouter-degraded"] = "true"  # nothing as strong as the request needed
     return headers
@@ -44,7 +47,9 @@ def log_decision(choice: RoutingChoice, *, requested: str, tenant_id: str, key_i
         extra={
             "requested_model": requested,
             "chosen": choice.alias,
-            "tier": choice.tier.value,
+            "tier": choice.tier.value if choice.tier is not None else None,
+            "policy": choice.policy,
+            "pinned": choice.pinned,
             "required_tier": choice.required_tier.value,
             "clears_bar": choice.clears_bar,
             "complexity": choice.complexity.value,
@@ -54,7 +59,7 @@ def log_decision(choice: RoutingChoice, *, requested: str, tenant_id: str, key_i
             "candidates": [
                 {
                     "alias": c.alias,
-                    "tier": c.tier.value,
+                    "tier": c.tier.value if c.tier is not None else None,
                     "expected_cost_usd": round(c.expected_cost_usd, 9),
                     "expected_latency_s": c.expected_latency_s,
                     "latency_measured": c.latency_measured,

@@ -17,6 +17,7 @@ from app.auth.errors import (
 )
 from app.auth.scopes import KNOWN_SCOPES, scope_allows
 from app.auth.service import find_key_by_secret
+from app.core.tiers import Tier
 from app.db.models import ApiKey
 from app.db.session import get_session
 
@@ -39,6 +40,8 @@ class AuthContext:
     tpm_limit: int | None  # None: the gateway default
     key_budget_nano: int | None  # monthly spending cap of the key, nano-dollars; None: no cap
     tenant_budget_nano: int | None  # monthly cap of the whole organisation
+    pinned_model: str | None  # the tenant's "auto" requests always go to this model
+    max_tier: Tier | None  # the strongest tier the tenant's "auto" requests may use
 
 
 def _bearer_token(request: Request) -> str:
@@ -85,6 +88,8 @@ async def authenticate(
         tpm_limit=key.tpm_limit,
         key_budget_nano=key.monthly_budget_nano_usd,
         tenant_budget_nano=key.tenant.monthly_budget_nano_usd,
+        pinned_model=key.tenant.routing_pinned_model,
+        max_tier=None if key.tenant.routing_max_tier is None else Tier(key.tenant.routing_max_tier),
     )
     request.state.auth = context  # lets the access log say who made the call
     return context

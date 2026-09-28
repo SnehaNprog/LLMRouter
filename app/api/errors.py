@@ -27,6 +27,7 @@ from app.quota.headers import rate_headers_of
 from app.quota.limiter import RateLimitExceededError, TokenLimitExceededError
 from app.router.context import ContextLengthExceededError
 from app.router.registry import UnknownModelError
+from app.routing.resolve import TenantPolicyError
 from app.schemas.error import ErrorBody, ErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,24 @@ async def _quota_unavailable_handler(_: Request, exc: Exception) -> JSONResponse
     )
 
 
+async def _tenant_policy_handler(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, TenantPolicyError)
+    logger.error("organisation routing policy cannot be applied: %s", exc)
+    if exc.kind == "no_model_under_cap":
+        return error_response(
+            403,
+            "This organisation's routing policy leaves no model available for automatic routing.",
+            type="permission_error",
+            code="routing_policy_no_model",
+        )
+    return error_response(
+        503,
+        "This organisation's routing policy refers to a model that is not available.",
+        type="api_error",
+        code="tenant_policy_invalid",
+    )
+
+
 async def _context_length_handler(_: Request, exc: Exception) -> JSONResponse:
     assert isinstance(exc, ContextLengthExceededError)
     return error_response(
@@ -219,4 +238,5 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(TokenLimitExceededError, _token_limit_handler)
     app.add_exception_handler(BudgetExceededError, _budget_handler)
     app.add_exception_handler(QuotaUnavailableError, _quota_unavailable_handler)
+    app.add_exception_handler(TenantPolicyError, _tenant_policy_handler)
     app.add_exception_handler(Exception, _unhandled_exception_handler)

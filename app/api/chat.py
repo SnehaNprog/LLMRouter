@@ -136,7 +136,13 @@ async def create_chat_completion(
 
     # "auto" is replaced by the model the smart router picks, before anything is priced or
     # reserved, so quotas, retries and fallbacks all see an ordinary request for that model.
-    request, choice = resolve_model(request, gateway.registry, gateway.latency)
+    request, choice = resolve_model(
+        request,
+        gateway.registry,
+        gateway.latency,
+        pinned_model=auth.pinned_model,
+        max_tier=auth.max_tier,
+    )
     escalation = choice.escalation if choice is not None else []
     if choice is not None:
         log_decision(choice, requested=AUTO_MODEL, tenant_id=auth.tenant_id, key_id=auth.key_id)

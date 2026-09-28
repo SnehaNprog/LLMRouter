@@ -20,7 +20,7 @@ class NoRoutableModelError(Exception):
     def __init__(
         self,
         message: str,
-        kind: Literal["no_tiers", "not_allowed", "context"],
+        kind: Literal["no_tiers", "not_allowed", "context", "policy"],
         *,
         window: int = 0,
         required: int = 0,
@@ -34,7 +34,7 @@ class NoRoutableModelError(Exception):
 @dataclass(frozen=True)
 class Candidate:
     alias: str
-    tier: Tier
+    tier: Tier | None  # None for a model without a tier, which only a pin can select
     expected_cost_usd: float
     expected_latency_s: float
     latency_measured: bool  # False when any of its deployments is still on the tier's default
@@ -48,9 +48,11 @@ class RoutingChoice:
     required_tier: Tier
     clears_bar: bool  # False if nothing as strong as the request needs was available
     candidates: list[Candidate]  # best first; candidates[0] is the choice
+    pinned: bool = False  # the tenant's policy fixed the model; the ranking was not used
+    policy: str | None = None  # the tenant policy that shaped this choice, if any
 
     @property
-    def tier(self) -> Tier:
+    def tier(self) -> Tier | None:
         return self.candidates[0].tier
 
     @property
@@ -61,19 +63,27 @@ class RoutingChoice:
         still meet the bar come last, as a final resort: a plainer answer beats an error.
         """
         rest = self.candidates[1:]
-        stronger = [c.alias for c in rest if c.tier >= self.tier]
-        weaker = [c.alias for c in rest if c.tier < self.tier]
+        own = self.tier
+        if own is None:
+            return [c.alias for c in rest]
+        stronger = [c.alias for c in rest if c.tier is None or c.tier >= own]
+        weaker = [c.alias for c in rest if c.tier is not None and c.tier < own]
         return stronger + weaker
 
     @property
     def reasons(self) -> list[str]:
         """A short, human-readable account of the decision, for logs."""
         top = ", ".join(self.complexity.top(3)) or "nothing in particular"
+        tier = self.tier.value if self.tier is not None else "no tier"
         text = [
             f"complexity {self.complexity.value:.2f} (driven by {top}) needs tier "
             f">= {self.required_tier.value}",
-            f"chose '{self.alias}' ({self.tier.value}) from {len(self.candidates)} candidate(s)",
+            f"chose '{self.alias}' ({tier}) from {len(self.candidates)} candidate(s)",
         ]
+        if self.pinned:
+            text.append("the organisation's routing policy pins this model")
+        elif self.policy:
+            text.append(f"the organisation's routing policy applies: {self.policy}")
         if not self.clears_bar:
             text.append(f"no model of tier {self.required_tier.value} or above was available")
         return text
@@ -88,7 +98,7 @@ def _expected_cost(deployments: list[Deployment], prompt: int, completion: int) 
 
 def _expected_latency(
     deployments: list[Deployment],
-    tier: Tier,
+    tier: Tier | None,
     latency: LatencyTracker,
     policy: RoutingPolicy,
     fastest_measured: float | None,
@@ -101,7 +111,7 @@ def _expected_latency(
     never be measured: starved by its own lack of data. This way it gets tried, and from then on
     it is judged by what it actually does.
     """
-    assumed = policy.latency_priors[tier]
+    assumed = policy.latency_priors[tier if tier is not None else Tier.MID]
     if fastest_measured is not None:
         assumed = min(assumed, fastest_measured)
     total_weight = sum(d.weight for d in deployments)
@@ -122,6 +132,7 @@ def choose_model(
     weights: ComplexityWeights | None = None,
     allow: Callable[[str], bool] | None = None,
     score: ComplexityScore | None = None,
+    max_tier: Tier | None = None,
 ) -> RoutingChoice:
     """Pick the model for a request: the best value among those strong enough to handle it.
 
@@ -129,6 +140,9 @@ def choose_model(
     stronger is a candidate (so long as the key may use it and its context window fits), and the
     candidates are ranked by expected cost and latency. If nothing is strong enough, the
     strongest models available are used instead and ``clears_bar`` says so.
+
+    ``max_tier`` is an organisation's cap: models stronger than it are never considered, so a
+    request that needs more is served by the best model within the cap (``clears_bar`` False).
 
     Raises NoRoutableModelError if no tiered model can take the request at all.
     """
@@ -143,6 +157,15 @@ def choose_model(
         raise NoRoutableModelError(
             "no model has a tier, so there is nothing to route between", "no_tiers"
         )
+    if max_tier is not None:
+        within_cap = [(a, t) for a, t in tiered if t <= max_tier]
+        if not within_cap:
+            raise NoRoutableModelError(
+                f"no routable model is at or below the tier {max_tier.value} that this "
+                "organisation's routing policy allows",
+                "policy",
+            )
+        tiered = within_cap
     allowed = [(a, t) for a, t in tiered if allow is None or allow(a)]
     if not allowed:
         raise NoRoutableModelError("this key may not use any of the routable models", "not_allowed")
@@ -195,7 +218,7 @@ def choose_model(
         ) / weight_sum
         ranked.append(
             (
-                (round(utility, 6), tier.rank, position),
+                (round(utility, 6), tier.rank if tier is not None else -1, position),
                 Candidate(
                     alias=alias,
                     tier=tier,
@@ -213,4 +236,60 @@ def choose_model(
         required_tier=required,
         clears_bar=clears_bar,
         candidates=ordered,
+        policy=None if max_tier is None else f"max-tier:{max_tier.value}",
+    )
+
+
+def pinned_choice(
+    request: ChatCompletionRequest,
+    registry: ModelRegistry,
+    latency: LatencyTracker,
+    alias: str,
+    *,
+    policy: RoutingPolicy | None = None,
+    weights: ComplexityWeights | None = None,
+) -> RoutingChoice:
+    """The choice for an organisation whose routing policy fixes the model.
+
+    Nothing is ranked: the pinned model is used whatever the request's complexity. The score is
+    still computed so the decision can be explained, and ``clears_bar`` is False when the pinned
+    model is weaker than the request would normally have needed.
+
+    Raises UnknownModelError if the alias is not configured, and NoRoutableModelError if the
+    request does not fit its context window.
+    """
+    policy = policy or registry.routing_policy
+    complexity = score_request(request, weights or registry.complexity_weights)
+    required = policy.required_tier(complexity.value)
+    prompt = estimate_prompt_tokens(request)
+    completion = policy.completion_estimate(request)
+
+    available = registry.get(alias)
+    usable = [d for d in available if fits(d, prompt + completion)]
+    if not usable:
+        needed = prompt + completion
+        raise NoRoutableModelError(
+            f"the request (about {needed} tokens) does not fit the pinned model's context window",
+            "context",
+            window=max(d.context_window or 0 for d in available),
+            required=needed,
+        )
+    tier = registry.tier_of(alias)
+    seconds, measured = _expected_latency(usable, tier, latency, policy, None)
+    candidate = Candidate(
+        alias=alias,
+        tier=tier,
+        expected_cost_usd=_expected_cost(usable, prompt, completion),
+        expected_latency_s=round(seconds, 4),
+        latency_measured=measured,
+        utility=0.0,
+    )
+    return RoutingChoice(
+        alias=alias,
+        complexity=complexity,
+        required_tier=required,
+        clears_bar=tier is None or tier >= required,
+        candidates=[candidate],
+        pinned=True,
+        policy="pinned",
     )

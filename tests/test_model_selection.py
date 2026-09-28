@@ -608,9 +608,10 @@ def test_the_choice_is_always_consistent_across_random_registries() -> None:
         assert choice.alias not in banned
         assert all(registry.tier_of(c.alias) is not None for c in choice.candidates)
         if choice.clears_bar:
-            assert all(c.tier >= needed for c in choice.candidates), round_number
+            assert all(c.tier is not None and c.tier >= needed for c in choice.candidates)
         else:
-            strongest = max(c.tier for c in choice.candidates)
+            tiers = [c.tier for c in choice.candidates if c.tier is not None]
+            strongest = max(tiers)
             assert all(c.tier == strongest for c in choice.candidates)
             assert strongest < needed
         assert choice == choose_model(

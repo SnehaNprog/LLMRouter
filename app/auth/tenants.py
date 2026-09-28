@@ -3,6 +3,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.service import INHERIT, TenantNotFoundError, _Inherit, budget_to_nano
+from app.core.tiers import Tier
 from app.db.models import Tenant
 
 
@@ -29,11 +30,27 @@ def clean_tenant_name(name: str) -> str:
     return name
 
 
+def _clean_alias(alias: str | None) -> str | None:
+    if alias is None:
+        return None
+    alias = alias.strip()
+    if not alias or len(alias) > 200 or any(ch.isspace() for ch in alias):
+        raise ValueError("pinned_model must be a model name without spaces, up to 200 characters")
+    return alias
+
+
 async def create_tenant(
-    session: AsyncSession, name: str, monthly_budget_usd: float | None = None
+    session: AsyncSession,
+    name: str,
+    monthly_budget_usd: float | None = None,
+    pinned_model: str | None = None,
+    max_tier: Tier | None = None,
 ) -> Tenant:
     tenant = Tenant(
-        name=clean_tenant_name(name), monthly_budget_nano_usd=budget_to_nano(monthly_budget_usd)
+        name=clean_tenant_name(name),
+        monthly_budget_nano_usd=budget_to_nano(monthly_budget_usd),
+        routing_pinned_model=_clean_alias(pinned_model),
+        routing_max_tier=None if max_tier is None else max_tier.value,
     )
     session.add(tenant)
     try:
@@ -65,10 +82,19 @@ async def update_tenant(
     name: str | None = None,
     is_active: bool | None = None,
     monthly_budget_usd: float | None | _Inherit = INHERIT,
+    pinned_model: str | None | _Inherit = INHERIT,
+    max_tier: Tier | None | _Inherit = INHERIT,
 ) -> Tenant:
-    """Change a tenant. ``monthly_budget_usd=None`` removes the budget; leaving it out keeps it."""
-    if name is None and is_active is None and isinstance(monthly_budget_usd, _Inherit):
-        raise ValueError("nothing to update: send a name, is_active and/or monthly_budget_usd")
+    """Change a tenant. For the budget and the routing policy, ``None`` removes the setting and
+    leaving it out keeps it."""
+    nothing_else = all(
+        isinstance(v, _Inherit) for v in (monthly_budget_usd, pinned_model, max_tier)
+    )
+    if name is None and is_active is None and nothing_else:
+        raise ValueError(
+            "nothing to update: send a name, is_active, monthly_budget_usd, pinned_model "
+            "and/or max_tier"
+        )
     budget_nano = (
         INHERIT if isinstance(monthly_budget_usd, _Inherit) else budget_to_nano(monthly_budget_usd)
     )
@@ -79,6 +105,10 @@ async def update_tenant(
         tenant.is_active = is_active
     if not isinstance(budget_nano, _Inherit):
         tenant.monthly_budget_nano_usd = budget_nano
+    if not isinstance(pinned_model, _Inherit):
+        tenant.routing_pinned_model = _clean_alias(pinned_model)
+    if not isinstance(max_tier, _Inherit):
+        tenant.routing_max_tier = None if max_tier is None else max_tier.value
     try:
         await session.commit()
     except IntegrityError:

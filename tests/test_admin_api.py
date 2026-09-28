@@ -100,7 +100,15 @@ def test_create_tenant(client: AuthedClient) -> None:
     assert body["name"] == "Globex"
     assert body["is_active"] is True
     assert len(body["id"]) == 32
-    assert set(body) == {"id", "name", "is_active", "monthly_budget_usd", "created_at"}
+    assert set(body) == {
+        "id",
+        "name",
+        "is_active",
+        "monthly_budget_usd",
+        "pinned_model",
+        "max_tier",
+        "created_at",
+    }
 
 
 def test_duplicate_tenant_names_conflict(client: AuthedClient) -> None:
