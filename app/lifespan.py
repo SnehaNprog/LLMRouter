@@ -100,6 +100,9 @@ def make_lifespan(
                         min_requests=settings.breaker_min_requests,
                         window_seconds=settings.breaker_window_seconds,
                         cooldown=settings.breaker_cooldown,
+                        half_open_max_calls=settings.breaker_half_open_calls,
+                        half_open_successes=settings.breaker_half_open_successes,
+                        probe_timeout=settings.breaker_probe_timeout,
                     )
                 ),
             )

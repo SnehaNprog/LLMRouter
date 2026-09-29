@@ -90,6 +90,8 @@ class BreakerSettings:
     window_seconds: float = 60.0
     cooldown: float = 30.0
     half_open_max_calls: int = 1
+    half_open_successes: int = 1
+    probe_timeout: float | None = 30.0
 
 
 class BreakerBoard:
@@ -122,6 +124,8 @@ class BreakerBoard:
             window_seconds=s.window_seconds,
             cooldown=s.cooldown,
             half_open_max_calls=s.half_open_max_calls,
+            half_open_successes=s.half_open_successes,
+            probe_timeout=s.probe_timeout,
             clock=self._clock,
             on_transition=self._on_transition,
         )

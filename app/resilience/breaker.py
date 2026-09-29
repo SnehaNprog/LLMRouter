@@ -31,7 +31,7 @@ class Permit:
     that frees a trial slot without counting for or against the dependency.
     """
 
-    def __init__(self, breaker: "CircuitBreaker", generation: int, probe: bool) -> None:
+    def __init__(self, breaker: "CircuitBreaker", generation: int, probe: int | None) -> None:
         self._breaker = breaker
         self._generation = generation
         self._probe = probe
@@ -65,9 +65,11 @@ class CircuitBreaker:
       by passing None, but not both.
     * **open**: calls are refused immediately, so a struggling dependency is left alone and
       callers fail fast instead of waiting on timeouts. After ``cooldown`` seconds it moves on.
-    * **half-open**: at most ``half_open_max_calls`` trial calls are let through at a time. A
-      trial that succeeds closes the breaker; a trial that fails opens it again with a fresh
-      cooldown.
+    * **half-open**: at most ``half_open_max_calls`` trial calls are let through at a time.
+      ``half_open_successes`` trials must succeed to close the breaker (one by default); a
+      trial that fails opens it again at once, with a fresh cooldown. A trial that is never
+      reported on (its caller crashed, say) would hold its slot for ever, so after
+      ``probe_timeout`` seconds the slot is taken back and a late report from it is ignored.
 
     Every state change starts a new *generation*. A call remembers the generation it was
     permitted in, and a report from an older one is ignored for deciding the state: a straggler
@@ -85,6 +87,8 @@ class CircuitBreaker:
         window_seconds: float = 60.0,
         cooldown: float = 30.0,
         half_open_max_calls: int = 1,
+        half_open_successes: int = 1,
+        probe_timeout: float | None = 30.0,
         clock: Callable[[], float] = time.monotonic,
         on_transition: Callable[[str, CircuitState, CircuitState], None] | None = None,
     ) -> None:
@@ -100,6 +104,10 @@ class CircuitBreaker:
             raise ValueError("cooldown must not be negative")
         if half_open_max_calls < 1:
             raise ValueError("half_open_max_calls must be at least 1")
+        if half_open_successes < 1:
+            raise ValueError("half_open_successes must be at least 1")
+        if probe_timeout is not None and probe_timeout <= 0:
+            raise ValueError("probe_timeout must be positive (or None for no limit)")
         self.name = name
         self._threshold = failure_threshold
         self._rate_threshold = failure_rate_threshold
@@ -108,11 +116,15 @@ class CircuitBreaker:
         self.last_trip_reason: str | None = None
         self._cooldown = cooldown
         self._max_probes = half_open_max_calls
+        self._needed_successes = half_open_successes
+        self._probe_timeout = probe_timeout
         self._clock = clock
         self._on_transition = on_transition
         self._state = CircuitState.CLOSED
         self._failures = 0
-        self._probes = 0
+        self._probes: dict[int, float] = {}  # trial calls in flight: id -> when they started
+        self._next_probe = 0
+        self._probe_successes = 0
         self._opened_at = 0.0
         self._generation = 0
 
@@ -138,7 +150,8 @@ class CircuitBreaker:
 
     @property
     def probes_in_flight(self) -> int:
-        return self._probes
+        self._reap_probes()
+        return len(self._probes)
 
     def remaining_cooldown(self) -> float:
         """Seconds until an open breaker will let a trial call through (0 if it is not open)."""
@@ -153,10 +166,13 @@ class CircuitBreaker:
         """Permission for one call, or None if the breaker refuses it."""
         self._refresh()
         if self._state is CircuitState.CLOSED:
-            return Permit(self, self._generation, probe=False)
-        if self._state is CircuitState.HALF_OPEN and self._probes < self._max_probes:
-            self._probes += 1
-            return Permit(self, self._generation, probe=True)
+            return Permit(self, self._generation, probe=None)
+        if self._state is CircuitState.HALF_OPEN:
+            self._reap_probes()
+            if len(self._probes) < self._max_probes:
+                self._next_probe += 1
+                self._probes[self._next_probe] = self._clock()
+                return Permit(self, self._generation, probe=self._next_probe)
         return None
 
     def acquire(self) -> Permit:
@@ -176,10 +192,25 @@ class CircuitBreaker:
         else:
             self._generation += 1
         self._failures = 0
-        self._probes = 0
+        self._probes.clear()
+        self._probe_successes = 0
         self._window.clear()
 
     # ---- the state machine ----
+
+    def _reap_probes(self) -> None:
+        """Take back the slots of trial calls that were never reported on."""
+        if self._probe_timeout is None or not self._probes:
+            return
+        now = self._clock()
+        for probe, started in list(self._probes.items()):
+            if now - started >= self._probe_timeout:
+                del self._probes[probe]
+                logger.warning(
+                    "circuit breaker %s: a trial call was never reported on; its slot is free",
+                    self.name,
+                    extra={"breaker": self.name},
+                )
 
     def _refresh(self) -> None:
         if self._state is CircuitState.OPEN and self._clock() - self._opened_at >= self._cooldown:
@@ -188,7 +219,8 @@ class CircuitBreaker:
     def _transition(self, new: CircuitState) -> None:
         old, self._state = self._state, new
         self._generation += 1  # calls permitted before this moment no longer steer the breaker
-        self._probes = 0
+        self._probes.clear()
+        self._probe_successes = 0
         self._window.clear()  # a new episode starts from a clean record
         if new is CircuitState.OPEN:
             self._opened_at = self._clock()
@@ -218,16 +250,23 @@ class CircuitBreaker:
         self._refresh()
         return generation == self._generation
 
-    def _on_success(self, generation: int, probe: bool) -> None:
+    def _finish_probe(self, probe: int | None) -> bool:
+        """Free a trial call's slot; False if it is not (or no longer) a trial in flight."""
+        self._reap_probes()
+        return probe is not None and self._probes.pop(probe, None) is not None
+
+    def _on_success(self, generation: int, probe: int | None) -> None:
         if not self._current(generation):
             return
         if self._state is CircuitState.CLOSED:
             self._failures = 0
             self._window.record(failed=False)
-        elif self._state is CircuitState.HALF_OPEN and probe:
-            self._transition(CircuitState.CLOSED)
+        elif self._state is CircuitState.HALF_OPEN and self._finish_probe(probe):
+            self._probe_successes += 1
+            if self._probe_successes >= self._needed_successes:
+                self._transition(CircuitState.CLOSED)
 
-    def _on_failure(self, generation: int, probe: bool) -> None:
+    def _on_failure(self, generation: int, probe: int | None) -> None:
         if not self._current(generation):
             return
         if self._state is CircuitState.CLOSED:
@@ -237,7 +276,7 @@ class CircuitBreaker:
             if reason is not None:
                 self.last_trip_reason = reason
                 self._transition(CircuitState.OPEN)
-        elif self._state is CircuitState.HALF_OPEN and probe:
+        elif self._state is CircuitState.HALF_OPEN and self._finish_probe(probe):
             self.last_trip_reason = "a trial call failed"
             self._transition(CircuitState.OPEN)
 
@@ -255,6 +294,6 @@ class CircuitBreaker:
             )
         return None
 
-    def _on_release(self, generation: int, probe: bool) -> None:
-        if probe and self._current(generation) and self._state is CircuitState.HALF_OPEN:
-            self._probes = max(0, self._probes - 1)
+    def _on_release(self, generation: int, probe: int | None) -> None:
+        if self._current(generation) and self._state is CircuitState.HALF_OPEN:
+            self._finish_probe(probe)

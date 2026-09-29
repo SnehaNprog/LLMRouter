@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     breaker_min_requests: int = Field(default=20, ge=1)
     breaker_window_seconds: float = Field(default=60.0, gt=0)
     breaker_cooldown: float = Field(default=30.0, ge=0)
+    # After the cooldown, up to breaker_half_open_calls trial calls may be in flight at once and
+    # breaker_half_open_successes of them must succeed to close it again. A trial never reported
+    # on frees its slot after breaker_probe_timeout seconds.
+    breaker_half_open_calls: int = Field(default=1, ge=1)
+    breaker_half_open_successes: int = Field(default=1, ge=1)
+    breaker_probe_timeout: float = Field(default=30.0, gt=0)
     http_max_connections: int = 100
     http_max_keepalive_connections: int = 20
 
