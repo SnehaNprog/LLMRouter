@@ -16,6 +16,7 @@ from app.quota.budget import BudgetStore
 from app.quota.budget_limiter import BudgetLimiter
 from app.quota.guard import QuotaGuard
 from app.quota.limiter import RateLimiter
+from app.resilience.board import BreakerBoard, BreakerSettings
 from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry, build_registry
 from app.router.retry import RetryPolicy
@@ -92,6 +93,15 @@ def make_lifespan(
                     max_delay=settings.retry_max_delay,
                 ),
                 latency=LatencyTracker(settings.latency_ewma_alpha),
+                breakers=BreakerBoard(
+                    BreakerSettings(
+                        failure_threshold=settings.breaker_failure_threshold or None,
+                        failure_rate_threshold=settings.breaker_failure_rate or None,
+                        min_requests=settings.breaker_min_requests,
+                        window_seconds=settings.breaker_window_seconds,
+                        cooldown=settings.breaker_cooldown,
+                    )
+                ),
             )
             logger.info(
                 "model config loaded",

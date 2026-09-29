@@ -5,6 +5,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
+from app.resilience.board import BreakerBoard, DeploymentUnavailable
 from app.router.context import ContextLengthExceededError, fits
 from app.router.deployment import Deployment
 from app.router.latency import LatencyTracker
@@ -39,6 +40,8 @@ class Router:
     must hit a deployment again does it wait, with exponential backoff and jitter.
     When every retry on an alias has failed, the next alias in its fallback chain is tried.
     Successful calls feed a per-deployment latency tracker (time to first chunk when streaming).
+    Every call is checked with the circuit breakers of its deployment and of its provider: one
+    that is open is not called, and the router moves on to the next deployment without waiting.
     """
 
     def __init__(
@@ -50,10 +53,12 @@ class Router:
         sleep: Sleep = asyncio.sleep,
         latency: LatencyTracker | None = None,
         clock: Callable[[], float] = time.perf_counter,
+        breakers: BreakerBoard | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy or RetryPolicy()
         self.latency = latency or LatencyTracker()
+        self.breakers = breakers or BreakerBoard()
         self._rng = rng or random.Random()
         self._sleep = sleep
         self._clock = clock
@@ -71,6 +76,20 @@ class Router:
         untried = [d for d in deployments if d.id not in tried]
         return weighted_choice(untried or deployments, self._rng)
 
+    async def _guarded[T](self, deployment: Deployment, call: Callable[[], Awaitable[T]]) -> T:
+        """Run ``call`` under the deployment's circuit breakers, reporting how it went.
+
+        Raises DeploymentUnavailable, without calling, if either breaker refuses.
+        """
+        permit = self.breakers.acquire(deployment)
+        try:
+            result = await call()
+        except BaseException as exc:  # includes cancellation, which counts as neither
+            permit.failure(exc)
+            raise
+        permit.success()
+        return result
+
     async def _with_retries[T](
         self,
         deployments: Sequence[Deployment],
@@ -85,10 +104,17 @@ class Router:
             try:
                 return await attempt(deployment)
             except Exception as exc:
+                has_untried = any(d.id not in tried for d in deployments)
+                if isinstance(exc, DeploymentUnavailable):
+                    # Nothing was tried, so it neither used up an attempt nor is worth waiting
+                    # for: an open breaker stays open however long we sleep.
+                    if not has_untried:
+                        raise
+                    attempt_number -= 1
+                    continue
                 decision = classify(exc)
                 if decision is Decision.FAIL or attempt_number >= self.policy.max_attempts:
                     raise
-                has_untried = any(d.id not in tried for d in deployments)
                 delay = (
                     0.0
                     if has_untried
@@ -194,7 +220,10 @@ class Router:
             deployment: Deployment,
         ) -> tuple[Deployment, ChatCompletionResponse]:
             started = self._clock()
-            response = await deployment.provider.chat(self._upstream_request(request, deployment))
+            response = await self._guarded(
+                deployment,
+                lambda: deployment.provider.chat(self._upstream_request(request, deployment)),
+            )
             self.latency.observe(deployment.id, self._clock() - started)
             return deployment, response
 
@@ -233,9 +262,15 @@ class Router:
         async def open_stream(deployment: Deployment) -> opened:
             started = self._clock()
             stream = deployment.provider.stream(self._upstream_request(request, deployment))
-            try:
-                first = await anext(stream)
-            except StopAsyncIteration:
+
+            async def first_chunk() -> ChatCompletionChunk | None:
+                try:
+                    return await anext(stream)
+                except StopAsyncIteration:
+                    return None
+
+            first = await self._guarded(deployment, first_chunk)
+            if first is None:
                 return deployment, None, stream
             # For streams the latency that matters to the caller is time to first chunk.
             self.latency.observe(deployment.id, self._clock() - started)

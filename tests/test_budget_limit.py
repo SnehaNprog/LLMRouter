@@ -560,7 +560,7 @@ def test_other_tenants_are_unaffected_by_a_spent_budget() -> None:
 
 def test_failed_requests_cost_nothing() -> None:
     provider = FakeProvider(fail_first=99)
-    with make_client(provider, retry_max_attempts=1) as client:
+    with make_client(provider, retry_max_attempts=1, breaker_failure_threshold=1000) as client:
         secret = make_key(client, monthly_budget_usd=0.003)  # not even two worst cases
 
         failures = [chat(client, secret).status_code for _ in range(10)]
@@ -606,7 +606,7 @@ def test_streams_without_usage_are_charged_from_the_text_sent() -> None:
 
 def test_a_stream_that_cannot_start_costs_nothing() -> None:
     provider = FakeProvider(fail_first=99)
-    with make_client(provider, retry_max_attempts=1) as client:
+    with make_client(provider, retry_max_attempts=1, breaker_failure_threshold=1000) as client:
         secret = make_key(client, monthly_budget_usd=0.003)
 
         failures = [chat(client, secret, stream=True).status_code for _ in range(8)]

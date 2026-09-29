@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import dotenv_values
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,8 +42,25 @@ class Settings(BaseSettings):
     retry_base_delay: float = 0.5
     retry_max_delay: float = 8.0
     latency_ewma_alpha: float = 0.2
+    # Circuit breakers on every deployment and provider endpoint: open after this many failures
+    # in a row (0 turns that rule off) or when this share of at least breaker_min_requests recent
+    # calls failed (0 turns that rule off); try again after the cooldown.
+    breaker_failure_threshold: int = Field(default=5, ge=0)
+    breaker_failure_rate: float = Field(default=0.5, ge=0, le=1)
+    breaker_min_requests: int = Field(default=20, ge=1)
+    breaker_window_seconds: float = Field(default=60.0, gt=0)
+    breaker_cooldown: float = Field(default=30.0, ge=0)
     http_max_connections: int = 100
     http_max_keepalive_connections: int = 20
+
+    @model_validator(mode="after")
+    def _a_breaker_rule_is_needed(self) -> "Settings":
+        if self.breaker_failure_threshold == 0 and self.breaker_failure_rate == 0:
+            raise ValueError(
+                "set breaker_failure_threshold or breaker_failure_rate; "
+                "with both at 0 no circuit breaker could ever open"
+            )
+        return self
 
 
 @lru_cache

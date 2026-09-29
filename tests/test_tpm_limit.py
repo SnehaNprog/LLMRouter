@@ -483,7 +483,7 @@ def test_a_smaller_request_fits_where_a_bigger_one_did_not() -> None:
 
 def test_failed_requests_give_everything_back() -> None:
     provider = FakeProvider(fail_first=99)
-    with make_client(provider, retry_max_attempts=1) as client:
+    with make_client(provider, retry_max_attempts=1, breaker_failure_threshold=1000) as client:
         secret = client.issue_key(tpm_limit=1_000)
 
         failures = [chat(client, secret).status_code for _ in range(10)]  # 5,200 reserved, in all
@@ -545,7 +545,7 @@ def test_streams_without_usage_are_settled_from_the_text_sent() -> None:
 
 def test_a_stream_that_fails_to_start_gives_everything_back() -> None:
     provider = FakeProvider(fail_first=99)
-    with make_client(provider, retry_max_attempts=1) as client:
+    with make_client(provider, retry_max_attempts=1, breaker_failure_threshold=1000) as client:
         secret = client.issue_key(tpm_limit=1_000)
 
         failures = [chat(client, secret, stream=True).status_code for _ in range(10)]
