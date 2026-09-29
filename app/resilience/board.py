@@ -1,14 +1,20 @@
+import asyncio
+import logging
+import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from app.core.model_config import ModelConfig
 from app.providers.errors import AuthFailed, ProviderDown, Timeout
 from app.resilience.breaker import CircuitBreaker, CircuitState, Permit
+from app.resilience.shared import SharedBreakerStore
 from app.router.deployment import Deployment
 
 Observer = Callable[[str, CircuitState, CircuitState], None]
+logger = logging.getLogger(__name__)
 
 
 def provider_key(config: ModelConfig) -> str:
@@ -99,6 +105,11 @@ class BreakerBoard:
 
     A deployment's breaker notices one model or key going bad; its provider's breaker notices
     the whole vendor going down. A call needs both to agree.
+
+    With a ``shared`` store, breakers that open are announced to the other gateway replicas, and
+    ``sync`` opens the local breakers that another replica has opened. Each breaker is looked up
+    at most once per ``sync_interval`` seconds, so the shared state costs a Redis round trip only
+    now and then, not on every request.
     """
 
     def __init__(
@@ -107,10 +118,17 @@ class BreakerBoard:
         *,
         clock: Callable[[], float] = time.monotonic,
         on_transition: Observer | None = None,
+        shared: SharedBreakerStore | None = None,
+        sync_interval: float = 1.0,
     ) -> None:
         self._settings = settings or BreakerSettings()
         self._clock = clock
         self._on_transition = on_transition
+        self._shared = shared
+        self._sync_interval = sync_interval
+        self._synced_at: dict[str, float] = {}
+        self._applying_shared = False  # True while opening a breaker on another replica's say-so
+        self._pending: set[asyncio.Task[object]] = set()
         self._deployments: dict[str, CircuitBreaker] = {}
         self._providers: dict[str, CircuitBreaker] = {}
 
@@ -127,8 +145,53 @@ class BreakerBoard:
             half_open_successes=s.half_open_successes,
             probe_timeout=s.probe_timeout,
             clock=self._clock,
-            on_transition=self._on_transition,
+            on_transition=self._observe,
         )
+
+    def _observe(self, name: str, old: CircuitState, new: CircuitState) -> None:
+        if self._on_transition is not None:
+            self._on_transition(name, old, new)
+        if self._shared is None or self._applying_shared:
+            return  # a breaker opened by another replica's word must not be announced again
+        if new is CircuitState.OPEN:
+            self._announce(self._shared.publish_open(name, self._settings.cooldown))
+        elif new is CircuitState.CLOSED:
+            self._announce(self._shared.publish_closed(name))
+
+    def _announce(self, publication: Coroutine[Any, Any, bool]) -> None:
+        """Send an update to Redis in the background: the call being protected never waits on it."""
+        try:
+            task = asyncio.get_running_loop().create_task(publication)
+        except RuntimeError:  # no event loop (the breakers are being driven synchronously)
+            publication.close()
+            return
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def sync(self, deployment: Deployment) -> None:
+        """Open this deployment's breakers if another replica has opened them."""
+        if self._shared is None:
+            return
+        for breaker in (self.provider_breaker(deployment), self.deployment_breaker(deployment)):
+            now = self._clock()
+            if now - self._synced_at.get(breaker.name, -math.inf) < self._sync_interval:
+                continue
+            self._synced_at[breaker.name] = now
+            if breaker.state is CircuitState.OPEN:
+                continue  # already refusing calls: nothing to learn
+            remaining = await self._shared.remaining_open(breaker.name)
+            if remaining is None:
+                continue
+            self._applying_shared = True
+            try:
+                breaker.trip(remaining, "another gateway replica opened it")
+            finally:
+                self._applying_shared = False
+
+    async def drain(self) -> None:
+        """Wait for updates still on their way to Redis (at shutdown, and in tests)."""
+        while self._pending:
+            await asyncio.gather(*self._pending, return_exceptions=True)
 
     def deployment_breaker(self, deployment: Deployment) -> CircuitBreaker:
         key = deployment.id

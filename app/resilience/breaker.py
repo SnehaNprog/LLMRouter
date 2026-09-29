@@ -196,6 +196,20 @@ class CircuitBreaker:
         self._probe_successes = 0
         self._window.clear()
 
+    def trip(self, remaining_cooldown: float, reason: str) -> bool:
+        """Open the breaker because something outside it knows the dependency is down.
+
+        It stays open for ``remaining_cooldown`` seconds rather than a full cooldown, so a breaker
+        told about an outage that began a while ago does not outlast it. Does nothing, and returns
+        False, if the breaker is already open.
+        """
+        if self._state is CircuitState.OPEN:
+            return False
+        self.last_trip_reason = reason
+        self._transition(CircuitState.OPEN)
+        self._opened_at = self._clock() - (self._cooldown - remaining_cooldown)
+        return True
+
     # ---- the state machine ----
 
     def _reap_probes(self) -> None:

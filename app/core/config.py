@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     breaker_half_open_calls: int = Field(default=1, ge=1)
     breaker_half_open_successes: int = Field(default=1, ge=1)
     breaker_probe_timeout: float = Field(default=30.0, gt=0)
+    # Tell the other gateway replicas, through Redis, which breakers are open, and check what they
+    # have told us at most every breaker_sync_interval seconds. Redis being down only turns this
+    # off: each replica's own breakers keep working.
+    breaker_shared: bool = True
+    breaker_sync_interval: float = Field(default=1.0, ge=0)
     http_max_connections: int = 100
     http_max_keepalive_connections: int = 20
 

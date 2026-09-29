@@ -17,6 +17,7 @@ from app.quota.budget_limiter import BudgetLimiter
 from app.quota.guard import QuotaGuard
 from app.quota.limiter import RateLimiter
 from app.resilience.board import BreakerBoard, BreakerSettings
+from app.resilience.shared import SharedBreakerStore
 from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry, build_registry
 from app.router.retry import RetryPolicy
@@ -103,7 +104,13 @@ def make_lifespan(
                         half_open_max_calls=settings.breaker_half_open_calls,
                         half_open_successes=settings.breaker_half_open_successes,
                         probe_timeout=settings.breaker_probe_timeout,
-                    )
+                    ),
+                    shared=(
+                        SharedBreakerStore(redis, settings.redis_key_prefix + "breaker:")
+                        if settings.breaker_shared
+                        else None
+                    ),
+                    sync_interval=settings.breaker_sync_interval,
                 ),
             )
             logger.info(
@@ -112,6 +119,9 @@ def make_lifespan(
             )
             yield
         finally:
+            router = getattr(app.state, "router", None)
+            if router is not None:
+                await router.breakers.drain()
             await client.aclose()
             await redis.aclose()
             await engine.dispose()

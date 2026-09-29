@@ -81,6 +81,7 @@ class Router:
 
         Raises DeploymentUnavailable, without calling, if either breaker refuses.
         """
+        await self.breakers.sync(deployment)
         permit = self.breakers.acquire(deployment)
         try:
             result = await call()
