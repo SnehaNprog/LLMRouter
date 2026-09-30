@@ -10,7 +10,9 @@ import httpx
 from app.core.model_config import ConfigError
 from app.evaluation.dataset import DEFAULT_DATASET, Benchmark, DatasetError, load_benchmark
 from app.evaluation.pricing import PriceBook
+from app.evaluation.routing_report import format_breakdown, routing_breakdown
 from app.evaluation.runner import EvalRecord, Runner, RunSummary, summarize
+from app.routing.policy import AUTO_MODEL
 
 DEFAULT_URL = "http://localhost:8000"
 
@@ -78,7 +80,25 @@ async def _run(
         )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _add_run_arguments(sub: argparse.ArgumentParser, default_label: str) -> None:
+    sub.add_argument("--label", default=default_label, help="name of this run in the results")
+    sub.add_argument("--base-url", default=os.environ.get("LLMROUTER_EVAL_URL", DEFAULT_URL))
+    sub.add_argument("--api-key", default=os.environ.get("LLMROUTER_EVAL_KEY"))
+    sub.add_argument("--config", type=Path, default=Path("config.yaml"), help="for prices")
+    sub.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    sub.add_argument("--out", type=Path, help="results file (default: eval_results/<label>.jsonl)")
+    sub.add_argument("--resume", action="store_true", help="skip items already answered in --out")
+    sub.add_argument("--concurrency", type=int, default=4)
+    sub.add_argument("--timeout", type=float, default=120.0, help="seconds per request")
+    sub.add_argument("--limit", type=int, help="only the first N items (a quick trial)")
+    sub.add_argument("--category", action="append", help="only these categories")
+    sub.add_argument("--difficulty", action="append", help="only these difficulties")
+    sub.add_argument(
+        "--allow-failures", action="store_true", help="exit 0 even if some items failed"
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.evaluation", description="Measure the router against a baseline"
     )
@@ -88,27 +108,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="ask every benchmark prompt of the frontier model: the always-frontier cost",
     )
     baseline.add_argument("--model", help="the frontier alias (default: the config's only one)")
-    baseline.add_argument("--label", default="baseline", help="name of this run in the results")
-    for sub in (baseline,):
-        sub.add_argument("--base-url", default=os.environ.get("LLMROUTER_EVAL_URL", DEFAULT_URL))
-        sub.add_argument("--api-key", default=os.environ.get("LLMROUTER_EVAL_KEY"))
-        sub.add_argument("--config", type=Path, default=Path("config.yaml"), help="for prices")
-        sub.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
-        sub.add_argument(
-            "--out", type=Path, help="results file (default: eval_results/<label>.jsonl)"
-        )
-        sub.add_argument(
-            "--resume", action="store_true", help="skip items already answered in --out"
-        )
-        sub.add_argument("--concurrency", type=int, default=4)
-        sub.add_argument("--timeout", type=float, default=120.0, help="seconds per request")
-        sub.add_argument("--limit", type=int, help="only the first N items (a quick trial)")
-        sub.add_argument("--category", action="append", help="only these categories")
-        sub.add_argument("--difficulty", action="append", help="only these difficulties")
-        sub.add_argument(
-            "--allow-failures", action="store_true", help="exit 0 even if some items failed"
-        )
-    args = parser.parse_args(argv)
+    _add_run_arguments(baseline, "baseline")
+    router = commands.add_parser(
+        "router", help="ask every benchmark prompt as model=auto and let the router choose"
+    )
+    router.add_argument(
+        "--allow-policy",
+        action="store_true",
+        help="accept answers shaped by the key's organisation policy (a pin or tier cap)",
+    )
+    _add_run_arguments(router, "router")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if not args.api_key:
         print("error: give an API key with --api-key or LLMROUTER_EVAL_KEY", file=sys.stderr)
@@ -122,7 +136,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 difficulties=set(args.difficulty) if args.difficulty else None,
                 limit=args.limit,
             )
-        model = choose_frontier(prices, args.model)
+        model = choose_frontier(prices, args.model) if args.command == "baseline" else AUTO_MODEL
     except (ConfigError, DatasetError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -144,6 +158,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     summary = summarize(records)
     print(format_summary(summary))
+    status = 0
+    if args.command == "router":
+        breakdown = routing_breakdown(records, benchmark)
+        print(format_breakdown(breakdown))
+        if breakdown.policy_shaped and not args.allow_policy:
+            print(
+                f"error: {breakdown.policy_shaped} answer(s) were shaped by the key's organisation "
+                f"routing policy {list(breakdown.policy_applied)}, so this is not the router on "
+                "its own. Use a key from an organisation with no pin or tier cap "
+                "(or pass --allow-policy).",
+                file=sys.stderr,
+            )
+            status = 1
     print(f"results written to {out}")
     if summary.failed and not args.allow_failures:
         print(
@@ -151,5 +178,5 @@ def main(argv: Sequence[str] | None = None) -> int:
             "comparable. Fix the cause and rerun with --resume (or pass --allow-failures).",
             file=sys.stderr,
         )
-        return 1
-    return 0
+        status = 1
+    return status

@@ -1,4 +1,4 @@
-.PHONY: install dev redis-up redis-down test-redis eval-baseline migrate migration admin-key test lint fmt typecheck check
+.PHONY: install dev redis-up redis-down test-redis eval-baseline eval-router migrate migration admin-key test lint fmt typecheck check
 
 install:
 	pip install -e ".[dev]"
@@ -20,6 +20,10 @@ test-redis:
 # the always-frontier cost: needs the gateway running (make dev) and LLMROUTER_EVAL_KEY set
 eval-baseline:
 	python -m app.evaluation baseline
+
+# the router's cost on the same prompts (model=auto); use a key from an unrestricted organisation
+eval-router:
+	python -m app.evaluation router
 
 migrate:
 	alembic upgrade head
