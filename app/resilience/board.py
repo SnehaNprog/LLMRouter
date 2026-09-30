@@ -8,7 +8,7 @@ from enum import Enum
 from typing import Any
 
 from app.core.model_config import ModelConfig
-from app.providers.errors import AuthFailed, ProviderDown, Timeout
+from app.providers.errors import AuthFailed, ProviderDown, RateLimited, Timeout
 from app.resilience.breaker import CircuitBreaker, CircuitState, Permit
 from app.resilience.shared import SharedBreakerStore
 from app.router.deployment import Deployment
@@ -55,15 +55,38 @@ class DeploymentPermit:
     are ignored.
     """
 
-    def __init__(self, deployment: Permit, provider: Permit) -> None:
+    def __init__(
+        self,
+        deployment: Permit,
+        provider: Permit,
+        *,
+        on_success: Callable[[], None] = lambda: None,
+        on_throttled: Callable[[float | None], object] = lambda retry_after: None,
+    ) -> None:
         self._deployment = deployment
         self._provider = provider
+        self._on_success = on_success
+        self._on_throttled = on_throttled
+        self._reported = False
 
     def success(self) -> None:
+        if self._reported:
+            return
+        self._reported = True
         self._deployment.success()
         self._provider.success()
+        self._on_success()
 
     def failure(self, error: BaseException) -> None:
+        if self._reported:
+            return
+        if isinstance(error, RateLimited):
+            # The vendor is up and working as designed, so no breaker hears of it; this
+            # deployment is just given a rest for as long as the vendor asked.
+            self.release()
+            self._on_throttled(error.retry_after)
+            return
+        self._reported = True
         match health_of(error):
             case Health.PROVIDER_DOWN:
                 self._deployment.failure()
@@ -75,6 +98,7 @@ class DeploymentPermit:
                 self.release()
 
     def release(self) -> None:
+        self._reported = True
         self._deployment.release()
         self._provider.release()
 
@@ -88,6 +112,13 @@ class DeploymentUnavailable(ProviderDown):
         self.retry_after = retry_after
 
 
+class DeploymentThrottled(RateLimited):
+    """A call was refused without being made, because the vendor recently said to slow down."""
+
+    def __init__(self, message: str, *, retry_after: float) -> None:
+        super().__init__(message, retry_after=retry_after)
+
+
 @dataclass(frozen=True)
 class BreakerSettings:
     failure_threshold: int | None = 5
@@ -98,6 +129,10 @@ class BreakerSettings:
     half_open_max_calls: int = 1
     half_open_successes: int = 1
     probe_timeout: float | None = 30.0
+    # How long a deployment is left alone after a 429 that says nothing about when to return;
+    # it doubles with every further 429 in a row. A Retry-After from the vendor is used as given.
+    throttle_cooldown: float = 5.0
+    throttle_max_cooldown: float = 60.0  # the longest any 429 can keep a deployment out
 
 
 class BreakerBoard:
@@ -129,6 +164,8 @@ class BreakerBoard:
         self._synced_at: dict[str, float] = {}
         self._applying_shared = False  # True while opening a breaker on another replica's say-so
         self._pending: set[asyncio.Task[object]] = set()
+        self._throttled_until: dict[str, float] = {}
+        self._throttle_streak: dict[str, int] = {}
         self._deployments: dict[str, CircuitBreaker] = {}
         self._providers: dict[str, CircuitBreaker] = {}
 
@@ -172,6 +209,7 @@ class BreakerBoard:
         """Open this deployment's breakers if another replica has opened them."""
         if self._shared is None:
             return
+        await self._sync_throttle(deployment)
         for breaker in (self.provider_breaker(deployment), self.deployment_breaker(deployment)):
             now = self._clock()
             if now - self._synced_at.get(breaker.name, -math.inf) < self._sync_interval:
@@ -187,6 +225,19 @@ class BreakerBoard:
                 breaker.trip(remaining, "another gateway replica opened it")
             finally:
                 self._applying_shared = False
+
+    async def _sync_throttle(self, deployment: Deployment) -> None:
+        assert self._shared is not None
+        key = self._throttle_key(deployment)
+        now = self._clock()
+        if now - self._synced_at.get(key, -math.inf) < self._sync_interval:
+            return
+        self._synced_at[key] = now
+        if self.throttle_remaining(deployment) > 0:
+            return
+        remaining = await self._shared.remaining_open(key)
+        if remaining is not None:
+            self._throttled_until[deployment.id] = self._clock() + remaining
 
     async def drain(self) -> None:
         """Wait for updates still on their way to Redis (at shutdown, and in tests)."""
@@ -205,8 +256,68 @@ class BreakerBoard:
             self._providers[key] = self._make(f"provider:{key}")
         return self._providers[key]
 
+    # ---- being told to slow down (HTTP 429) ----
+
+    def throttle(self, deployment: Deployment, retry_after: float | None = None) -> float:
+        """Leave a deployment alone after a 429; returns the seconds it will be left alone.
+
+        The vendor's ``Retry-After`` is honoured as given (up to ``throttle_max_cooldown``).
+        Without one the wait starts at ``throttle_cooldown`` and doubles with each further 429
+        in a row, so a deployment that stays throttled is not probed ever more hopefully.
+        """
+        s = self._settings
+        streak = self._throttle_streak.get(deployment.id, 0) + 1
+        self._throttle_streak[deployment.id] = streak
+        if retry_after is not None and retry_after > 0:
+            seconds = retry_after
+        else:
+            seconds = s.throttle_cooldown * 2 ** min(streak - 1, 16)
+        seconds = min(seconds, s.throttle_max_cooldown)
+        until = self._clock() + seconds
+        self._throttled_until[deployment.id] = max(
+            until, self._throttled_until.get(deployment.id, 0)
+        )
+        if self._shared is not None:
+            self._announce(self._shared.publish_open(self._throttle_key(deployment), seconds))
+        logger.warning(
+            "deployment throttled by its vendor, leaving it alone",
+            extra={"deployment": deployment.id, "cooldown": round(seconds, 3), "streak": streak},
+        )
+        return seconds
+
+    @staticmethod
+    def _throttle_key(deployment: Deployment) -> str:
+        return f"throttle:{deployment.id}"
+
+    def throttle_remaining(self, deployment: Deployment) -> float:
+        """Seconds until a throttled deployment may be called again (0 if it is not throttled)."""
+        until = self._throttled_until.get(deployment.id)
+        if until is None:
+            return 0.0
+        remaining = until - self._clock()
+        if remaining <= 0:
+            del self._throttled_until[deployment.id]  # the streak stays: it ends with a success
+            return 0.0
+        return remaining
+
+    def expire_throttle(self, deployment: Deployment) -> None:
+        """Forget a throttle whose wait the caller has sat out itself."""
+        self._throttled_until.pop(deployment.id, None)
+
+    def _succeeded(self, deployment: Deployment) -> None:
+        self._throttle_streak.pop(deployment.id, None)
+
     def acquire(self, deployment: Deployment) -> DeploymentPermit:
-        """Permission to call a deployment, or DeploymentUnavailable if either breaker refuses."""
+        """Permission to call a deployment.
+
+        Raises DeploymentThrottled if the vendor recently asked for calls to slow down, and
+        DeploymentUnavailable if either circuit breaker refuses.
+        """
+        if (waiting := self.throttle_remaining(deployment)) > 0:
+            raise DeploymentThrottled(
+                f"{deployment.alias}: the provider asked for requests to slow down",
+                retry_after=waiting,
+            )
         own = self.deployment_breaker(deployment)
         vendor = self.provider_breaker(deployment)
         own_permit = own.try_acquire()
@@ -224,11 +335,24 @@ class BreakerBoard:
                 breaker=vendor.name,
                 retry_after=vendor.remaining_cooldown(),
             )
-        return DeploymentPermit(own_permit, vendor_permit)
+        return DeploymentPermit(
+            own_permit,
+            vendor_permit,
+            on_success=lambda: self._succeeded(deployment),
+            on_throttled=lambda retry_after: self.throttle(deployment, retry_after),
+        )
 
     def is_open(self, deployment: Deployment) -> bool:
         """Whether a call right now would be refused (ignoring trial slots already taken)."""
         return (
+            self.throttle_remaining(deployment) > 0
+            or self.deployment_breaker(deployment).state is CircuitState.OPEN
+            or self.provider_breaker(deployment).state is CircuitState.OPEN
+        )
+
+    def is_throttled_only(self, deployment: Deployment) -> bool:
+        """Refused because of a 429, not because anything is broken."""
+        return self.throttle_remaining(deployment) > 0 and not (
             self.deployment_breaker(deployment).state is CircuitState.OPEN
             or self.provider_breaker(deployment).state is CircuitState.OPEN
         )
@@ -238,6 +362,7 @@ class BreakerBoard:
         return max(
             self.deployment_breaker(deployment).remaining_cooldown(),
             self.provider_breaker(deployment).remaining_cooldown(),
+            self.throttle_remaining(deployment),
         )
 
     async def sync_all(self, deployments: Iterable[Deployment]) -> None:

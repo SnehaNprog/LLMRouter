@@ -122,13 +122,16 @@ async def test_rate_limit_on_the_only_deployment_waits_for_retry_after() -> None
     assert clock.sleeps == [3.0]
 
 
-async def test_retry_after_is_capped_by_max_delay() -> None:
-    provider = FakeProvider(fail_first=1, error_factory=lambda: RateLimited("x", retry_after=600))
+async def test_a_retry_after_longer_than_max_delay_is_passed_on_not_cut_short() -> None:
+    provider = FakeProvider(fail_first=1, error_factory=lambda: RateLimited("x", retry_after=30))
     router, clock = router_for(provider)
 
-    await router.complete(REQUEST)
+    with pytest.raises(RateLimited) as caught:
+        await router.complete(REQUEST)
 
-    assert clock.sleeps == [8.0]
+    assert provider.calls == 1  # retrying after 8 s would have ignored the vendor's 30
+    assert clock.sleeps == []
+    assert caught.value.retry_after == 30
 
 
 # ---------- several deployments ----------

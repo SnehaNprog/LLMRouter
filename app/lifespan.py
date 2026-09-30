@@ -104,6 +104,8 @@ def make_lifespan(
                         half_open_max_calls=settings.breaker_half_open_calls,
                         half_open_successes=settings.breaker_half_open_successes,
                         probe_timeout=settings.breaker_probe_timeout,
+                        throttle_cooldown=settings.throttle_cooldown,
+                        throttle_max_cooldown=settings.throttle_max_cooldown,
                     ),
                     shared=(
                         SharedBreakerStore(redis, settings.redis_key_prefix + "breaker:")

@@ -5,7 +5,8 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-from app.resilience.board import BreakerBoard, DeploymentUnavailable
+from app.providers.errors import RateLimited
+from app.resilience.board import BreakerBoard, DeploymentThrottled, DeploymentUnavailable
 from app.router.context import ContextLengthExceededError, fits
 from app.router.deployment import Deployment
 from app.router.latency import LatencyTracker
@@ -116,9 +117,9 @@ class Router:
                 return await attempt(deployment)
             except Exception as exc:
                 has_untried = any(d.id not in tried for d in deployments)
-                if isinstance(exc, DeploymentUnavailable):
+                if isinstance(exc, DeploymentUnavailable | DeploymentThrottled):
                     # Nothing was tried, so it neither used up an attempt nor is worth waiting
-                    # for: an open breaker stays open however long we sleep.
+                    # for: an open breaker, or a vendor's request to slow down, outlasts a sleep.
                     if not has_untried:
                         raise
                     attempt_number -= 1
@@ -136,6 +137,16 @@ class Router:
                         retry_after=getattr(exc, "retry_after", None),
                     )
                 )
+                throttled = isinstance(exc, RateLimited) and not has_untried
+                asked = getattr(exc, "retry_after", None)
+                if (
+                    throttled
+                    and asked is not None
+                    and (self.breakers.throttle_remaining(deployment) > delay)
+                ):
+                    # The vendor asked for longer than we are willing to wait: retrying sooner
+                    # would ignore it, so the caller is told instead, with the vendor's wait.
+                    raise
                 logger.warning(
                     "attempt failed, retrying",
                     extra={
@@ -148,6 +159,8 @@ class Router:
                 )
                 if delay > 0:
                     await self._sleep(delay)
+                if throttled:
+                    self.breakers.expire_throttle(deployment)  # we have waited it out
 
     async def _across_fallbacks[T](
         self,
@@ -172,7 +185,8 @@ class Router:
             chain.extend(name for name in self.registry.chain(alias) if name not in chain)
         last_error: Exception | None = None
         largest_window = 0
-        wait: float | None = None  # the soonest any skipped, broken-down model may be tried
+        wait: float | None = None  # the soonest any skipped, unavailable model may be tried
+        only_throttled = True  # whether every skipped model was resting after a 429, not broken
         for position, name in enumerate(chain):
             if position >= configured and admit is not None and not await admit(name):
                 logger.info("escalation target skipped, not admitted", extra={"model": name})
@@ -191,8 +205,11 @@ class Router:
             if not healthy:
                 soonest = min(self.breakers.wait_for(d) for d in candidates)
                 wait = soonest if wait is None else min(wait, soonest)
+                only_throttled = only_throttled and all(
+                    self.breakers.is_throttled_only(d) for d in candidates
+                )
                 logger.info(
-                    "model skipped, every deployment is behind an open circuit breaker",
+                    "model skipped, every deployment is resting or behind an open circuit breaker",
                     extra={"model": name},
                 )
                 continue
@@ -213,6 +230,11 @@ class Router:
                     )
         if last_error is not None:
             raise last_error
+        if wait is not None and only_throttled:
+            raise DeploymentThrottled(
+                "every provider that could serve this request has asked for requests to slow down",
+                retry_after=wait,
+            )
         if wait is not None:
             raise DeploymentUnavailable(
                 "every provider that could serve this request is unavailable",

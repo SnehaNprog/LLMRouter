@@ -172,7 +172,7 @@ def test_a_rejected_key_opens_only_the_deployment() -> None:
     board.acquire(good).success()  # the same vendor, with a working key, is still used
 
 
-@pytest.mark.parametrize("error", [BadRequest("x"), RateLimited("x"), ValueError("bug")])
+@pytest.mark.parametrize("error", [BadRequest("x"), ValueError("bug")])
 def test_failures_that_say_nothing_about_health_never_open_a_breaker(error: Exception) -> None:
     board, _ = board_for(threshold=2)
     target = deployment()

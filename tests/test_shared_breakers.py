@@ -307,7 +307,8 @@ async def test_a_replica_looks_at_redis_only_once_per_interval() -> None:
 
     async def counting(name: str) -> float | None:
         nonlocal looks
-        looks += 1
+        if not name.startswith("throttle:"):  # these tests are about the breakers
+            looks += 1
         return await original(name)
 
     two.store.remaining_open = counting  # type: ignore[method-assign]
@@ -332,7 +333,8 @@ async def test_it_does_not_ask_about_a_breaker_that_is_already_open_locally() ->
 
     async def counting(name: str) -> float | None:
         nonlocal looks
-        looks += 1
+        if not name.startswith("throttle:"):  # these tests are about the breakers
+            looks += 1
         return await original(name)
 
     two.store.remaining_open = counting  # type: ignore[method-assign]
