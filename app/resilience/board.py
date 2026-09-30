@@ -2,7 +2,7 @@ import asyncio
 import logging
 import math
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -232,6 +232,18 @@ class BreakerBoard:
             self.deployment_breaker(deployment).state is CircuitState.OPEN
             or self.provider_breaker(deployment).state is CircuitState.OPEN
         )
+
+    def wait_for(self, deployment: Deployment) -> float:
+        """Seconds until a refused deployment may be tried again (0 if it is not refused)."""
+        return max(
+            self.deployment_breaker(deployment).remaining_cooldown(),
+            self.provider_breaker(deployment).remaining_cooldown(),
+        )
+
+    async def sync_all(self, deployments: Iterable[Deployment]) -> None:
+        """Bring the breakers of these deployments up to date with what other replicas know."""
+        if self._shared is not None:
+            await asyncio.gather(*(self.sync(d) for d in deployments))
 
     def states(self) -> dict[str, str]:
         """Every breaker made so far and its state, for inspection."""

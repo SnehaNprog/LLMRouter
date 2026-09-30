@@ -1,7 +1,9 @@
+from collections.abc import Callable
 from typing import Literal
 
 from app.core.tiers import Tier
 from app.router.context import ContextLengthExceededError
+from app.router.deployment import Deployment
 from app.router.latency import LatencyTracker
 from app.router.registry import ModelRegistry, UnknownModelError
 from app.routing.policy import AUTO_MODEL
@@ -35,6 +37,7 @@ def resolve_model(
     *,
     pinned_model: str | None = None,
     max_tier: Tier | None = None,
+    healthy: Callable[[Deployment], bool] | None = None,
 ) -> tuple[ChatCompletionRequest, RoutingChoice | None]:
     """Turn ``model="auto"`` into a concrete model; any other request passes through untouched.
 
@@ -43,7 +46,7 @@ def resolve_model(
 
     An organisation's policy shapes the choice: ``pinned_model`` fixes it outright, and
     ``max_tier`` caps how strong a model smart routing may pick. Neither affects requests that
-    name a model.
+    name a model. ``healthy`` lets smart routing avoid models whose deployments are all down.
 
     Failures are reported the way a caller would expect them: with no tiered model configured
     "auto" simply does not exist (a 404), and a request too big for every routable model is the
@@ -55,7 +58,7 @@ def resolve_model(
         if pinned_model is not None:
             choice = _pinned(request, registry, latency, pinned_model, max_tier)
         else:
-            choice = choose_model(request, registry, latency, max_tier=max_tier)
+            choice = choose_model(request, registry, latency, max_tier=max_tier, healthy=healthy)
     except NoRoutableModelError as exc:
         if exc.kind == "context":
             raise ContextLengthExceededError(window=exc.window, required=exc.required) from None

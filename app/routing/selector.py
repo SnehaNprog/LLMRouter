@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from app.core.tiers import Tier
@@ -50,6 +50,7 @@ class RoutingChoice:
     candidates: list[Candidate]  # best first; candidates[0] is the choice
     pinned: bool = False  # the tenant's policy fixed the model; the ranking was not used
     policy: str | None = None  # the tenant policy that shaped this choice, if any
+    unavailable: list[str] = field(default_factory=list)  # left out: every deployment is down
 
     @property
     def tier(self) -> Tier | None:
@@ -84,6 +85,8 @@ class RoutingChoice:
             text.append("the organisation's routing policy pins this model")
         elif self.policy:
             text.append(f"the organisation's routing policy applies: {self.policy}")
+        if self.unavailable:
+            text.append("skipped, circuit breaker open: " + ", ".join(self.unavailable))
         if not self.clears_bar:
             text.append(f"no model of tier {self.required_tier.value} or above was available")
         return text
@@ -133,6 +136,7 @@ def choose_model(
     allow: Callable[[str], bool] | None = None,
     score: ComplexityScore | None = None,
     max_tier: Tier | None = None,
+    healthy: Callable[[Deployment], bool] | None = None,
 ) -> RoutingChoice:
     """Pick the model for a request: the best value among those strong enough to handle it.
 
@@ -143,6 +147,12 @@ def choose_model(
 
     ``max_tier`` is an organisation's cap: models stronger than it are never considered, so a
     request that needs more is served by the best model within the cap (``clears_bar`` False).
+
+    ``healthy`` says whether a deployment can be called right now (its circuit breakers are not
+    open). A model is judged on its healthy deployments only, and a model with none is left out,
+    so traffic goes to whatever is up instead of to something that will only refuse it. If
+    nothing at all is healthy the check is dropped: the ranking is as it would be anyway, and the
+    request meets the outage honestly further on.
 
     Raises NoRoutableModelError if no tiered model can take the request at all.
     """
@@ -182,6 +192,22 @@ def choose_model(
             required=needed,
         )
 
+    def deployments_of(alias: str) -> list[Deployment]:
+        return [
+            d
+            for d in registry.get(alias)
+            if fits(d, prompt + completion) and (healthy is None or healthy(d))
+        ]
+
+    skipped: list[str] = []
+    if healthy is not None:
+        up = [(a, t) for a, t in usable if deployments_of(a)]
+        if up:
+            skipped = [a for a, _ in usable if all(a != b for b, _ in up)]
+            usable = up
+        else:
+            healthy = None  # everything is down: rank as if nothing were
+
     eligible = [(a, t) for a, t in usable if t >= required]
     clears_bar = bool(eligible)
     if not eligible:  # nothing is strong enough: do the best that can be done
@@ -192,13 +218,13 @@ def choose_model(
         seconds
         for alias, _ in eligible
         for d in registry.get(alias)
-        if (seconds := latency.ewma(d.id)) is not None
+        if (healthy is None or healthy(d)) and (seconds := latency.ewma(d.id)) is not None
     ]
     fastest_measured = min(observed_seconds, default=None)
 
     raw = []
     for position, (alias, tier) in enumerate(eligible):
-        deployments = [d for d in registry.get(alias) if fits(d, prompt + completion)]
+        deployments = deployments_of(alias)
         cost = _expected_cost(deployments, prompt, completion)
         seconds, measured = _expected_latency(deployments, tier, latency, policy, fastest_measured)
         raw.append((alias, tier, cost, seconds, measured, position))
@@ -237,6 +263,7 @@ def choose_model(
         clears_bar=clears_bar,
         candidates=ordered,
         policy=None if max_tier is None else f"max-tier:{max_tier.value}",
+        unavailable=skipped,
     )
 
 

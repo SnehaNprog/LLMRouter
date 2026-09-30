@@ -63,6 +63,16 @@ class Router:
         self._sleep = sleep
         self._clock = clock
 
+    def is_healthy(self, deployment: Deployment) -> bool:
+        """False while a circuit breaker is refusing calls to the deployment."""
+        return not self.breakers.is_open(deployment)
+
+    async def refresh_health(self) -> None:
+        """Learn what other gateway replicas know about which deployments are down."""
+        await self.breakers.sync_all(
+            d for alias in self.registry.aliases() for d in self.registry.get(alias)
+        )
+
     def select(self, alias: str) -> Deployment:
         return weighted_choice(self.registry.get(alias), self._rng)
 
@@ -162,6 +172,7 @@ class Router:
             chain.extend(name for name in self.registry.chain(alias) if name not in chain)
         last_error: Exception | None = None
         largest_window = 0
+        wait: float | None = None  # the soonest any skipped, broken-down model may be tried
         for position, name in enumerate(chain):
             if position >= configured and admit is not None and not await admit(name):
                 logger.info("escalation target skipped, not admitted", extra={"model": name})
@@ -175,8 +186,18 @@ class Router:
                     extra={"model": name, "required_tokens": required},
                 )
                 continue
+            await self.breakers.sync_all(candidates)
+            healthy = [d for d in candidates if self.is_healthy(d)]
+            if not healthy:
+                soonest = min(self.breakers.wait_for(d) for d in candidates)
+                wait = soonest if wait is None else min(wait, soonest)
+                logger.info(
+                    "model skipped, every deployment is behind an open circuit breaker",
+                    extra={"model": name},
+                )
+                continue
             try:
-                return await run(candidates)
+                return await run(healthy)
             except Exception as exc:
                 if classify(exc) is Decision.FAIL:
                     raise
@@ -192,6 +213,12 @@ class Router:
                     )
         if last_error is not None:
             raise last_error
+        if wait is not None:
+            raise DeploymentUnavailable(
+                "every provider that could serve this request is unavailable",
+                breaker="all",
+                retry_after=wait,
+            )
         raise ContextLengthExceededError(window=largest_window, required=required)
 
     @staticmethod

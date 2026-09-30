@@ -494,7 +494,7 @@ def test_the_app_uses_the_breaker_settings() -> None:
     with api_client(provider, breaker_failure_threshold=2) as client:
         statuses = [ask(client).status_code for _ in range(4)]
 
-    assert statuses == [502] * 4
+    assert statuses == [502, 502, 503, 503]  # then every provider is behind an open breaker
     assert provider.calls == 2  # the breaker opened after two failures; the rest never got through
 
 
@@ -512,13 +512,14 @@ def test_a_rate_only_setup_works() -> None:
     assert provider.calls == 4
 
 
-def test_it_is_a_clean_502_not_a_crash_when_a_breaker_refuses() -> None:
+def test_a_refusal_by_the_breakers_is_a_503_with_a_retry_time() -> None:
     with api_client(FakeProvider(fail_first=999), breaker_failure_threshold=1) as client:
         ask(client)
         response = ask(client)
 
-    assert response.status_code == 502
-    assert response.json()["error"]["code"] == "upstream_unavailable"
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "providers_unavailable"
+    assert 1 <= int(response.headers["Retry-After"]) <= 30
 
 
 def test_both_rules_off_is_a_configuration_error() -> None:

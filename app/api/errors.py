@@ -25,6 +25,7 @@ from app.quota.budget_limiter import BudgetExceededError
 from app.quota.guard import QuotaUnavailableError
 from app.quota.headers import rate_headers_of
 from app.quota.limiter import RateLimitExceededError, TokenLimitExceededError
+from app.resilience.board import DeploymentUnavailable
 from app.router.context import ContextLengthExceededError
 from app.router.registry import UnknownModelError
 from app.routing.resolve import TenantPolicyError
@@ -60,6 +61,15 @@ def error_response(
 
 def describe_provider_error(exc: ProviderError) -> tuple[int, ErrorBody]:
     """Gateway status and OpenAI-style body for a failure reported by an upstream provider."""
+    if isinstance(exc, DeploymentUnavailable):
+        # Nothing was tried: every deployment that could serve the request is behind an open
+        # circuit breaker. The client should come back when the soonest of them may be tried.
+        return 503, ErrorBody(
+            message="No upstream provider is currently available for this request; try again "
+            "shortly",
+            type="api_error",
+            code="providers_unavailable",
+        )
     if isinstance(exc, RateLimited):
         return 429, ErrorBody(
             message=exc.message, type="rate_limit_error", code="upstream_rate_limited"
@@ -88,6 +98,8 @@ async def _provider_error_handler(_: Request, exc: Exception) -> JSONResponse:
     headers = None
     if isinstance(exc, RateLimited) and exc.retry_after is not None:
         headers = {"Retry-After": str(math.ceil(exc.retry_after))}
+    elif isinstance(exc, DeploymentUnavailable):
+        headers = {"Retry-After": str(max(1, math.ceil(exc.retry_after)))}
     logger.warning(
         "upstream provider error",
         extra={"provider": exc.provider, "upstream_status": exc.upstream_status},

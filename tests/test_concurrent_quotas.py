@@ -402,8 +402,9 @@ def test_no_allowance_is_left_stuck_after_a_storm_of_failures(
         spent = portal.call(world.redis.get, f"llmrouter:budget:key:{key_id}:{period}")
 
     # Reservations held by requests still in flight can legitimately crowd out late arrivals
-    # (a 429), but nothing may succeed, and nothing may be left behind afterwards.
+    # (a 429), and once the circuit breakers open the rest are refused outright (a 503), but
+    # nothing may succeed, and nothing may be left behind afterwards.
     assert count(results, 502) >= 1
-    assert count(results, 502) + count(results, 429) == REQUESTS
+    assert count(results, 502) + count(results, 503) + count(results, 429) == REQUESTS
     assert tokens >= 999  # every reservation of 100 tokens, refused or failed, came back
     assert int(spent) == 0  # and so did all the reserved money
