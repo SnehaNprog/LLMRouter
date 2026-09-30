@@ -1,4 +1,4 @@
-.PHONY: install dev redis-up redis-down test-redis migrate migration admin-key test lint fmt typecheck check
+.PHONY: install dev redis-up redis-down test-redis eval-baseline migrate migration admin-key test lint fmt typecheck check
 
 install:
 	pip install -e ".[dev]"
@@ -16,6 +16,10 @@ redis-down:
 # also runs the Redis tests against a real server (flushes database 15)
 test-redis:
 	LLMROUTER_TEST_REDIS_URL=redis://localhost:6379/15 pytest -q
+
+# the always-frontier cost: needs the gateway running (make dev) and LLMROUTER_EVAL_KEY set
+eval-baseline:
+	python -m app.evaluation baseline
 
 migrate:
 	alembic upgrade head
