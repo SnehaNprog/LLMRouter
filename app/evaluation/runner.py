@@ -2,7 +2,7 @@ import asyncio
 import json
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.evaluation.dataset import Benchmark, BenchmarkItem
 from app.evaluation.pricing import PriceBook
-
-RETRYABLE = {429, 502, 503, 504}
-Sleep = Callable[[float], Awaitable[None]]
+from app.evaluation.transport import Sleep, error_text, post_with_retries
 
 
 class EvalRecord(BaseModel):
@@ -100,14 +98,6 @@ def load_records(path: Path) -> list[EvalRecord]:
     return list(latest.values())
 
 
-def _error_text(response: httpx.Response) -> str:
-    try:
-        message = response.json()["error"]["message"]
-    except (ValueError, KeyError, TypeError):
-        message = response.text
-    return f"HTTP {response.status_code}: {str(message)[:300]}"
-
-
 def _routing_headers(response: httpx.Response) -> dict[str, str]:
     return {k: v for k, v in response.headers.items() if k.lower().startswith("x-llmrouter-")}
 
@@ -190,35 +180,28 @@ class Runner:
     async def ask(self, item: BenchmarkItem, *, model: str, label: str) -> EvalRecord:
         """Send one item, retrying transient failures, and describe the outcome."""
         body = item.to_request(model).model_dump(exclude_none=True)
-        attempts = 0
-        while True:
-            attempts += 1
-            started = self._clock()
-            try:
-                response = await self._client.post("/v1/chat/completions", json=body)
-            except httpx.HTTPError as exc:
-                if attempts <= self._retries:
-                    await self._sleep(min(2.0 ** (attempts - 1), self._max_wait))
-                    continue
-                return self._failure(
-                    item, model, label, None, f"{type(exc).__name__}: {exc}", attempts
-                )
-            elapsed = self._clock() - started
-            if response.status_code in RETRYABLE and attempts <= self._retries:
-                await self._sleep(self._wait(response, attempts))
-                continue
-            if response.status_code != 200:
-                return self._failure(
-                    item, model, label, response.status_code, _error_text(response), attempts
-                )
-            return self._success(item, model, label, response, elapsed, attempts)
-
-    def _wait(self, response: httpx.Response, attempts: int) -> float:
-        try:
-            asked = float(response.headers["Retry-After"])
-        except (KeyError, ValueError):
-            asked = 0.0
-        return min(max(asked, 2.0 ** (attempts - 1)), self._max_wait)
+        attempt = await post_with_retries(
+            self._client,
+            body,
+            retries=self._retries,
+            max_wait=self._max_wait,
+            sleep=self._sleep,
+            clock=self._clock,
+        )
+        if attempt.response is None:
+            return self._failure(item, model, label, None, attempt.error or "", attempt.attempts)
+        if attempt.response.status_code != 200:
+            return self._failure(
+                item,
+                model,
+                label,
+                attempt.response.status_code,
+                error_text(attempt.response),
+                attempt.attempts,
+            )
+        return self._success(
+            item, model, label, attempt.response, attempt.elapsed, attempt.attempts
+        )
 
     @staticmethod
     def _failure(

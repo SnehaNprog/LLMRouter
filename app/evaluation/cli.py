@@ -9,9 +9,17 @@ import httpx
 
 from app.core.model_config import ConfigError
 from app.evaluation.dataset import DEFAULT_DATASET, Benchmark, DatasetError, load_benchmark
+from app.evaluation.judge import Judge
 from app.evaluation.pricing import PriceBook
+from app.evaluation.quality import (
+    QualitySummary,
+    ScoreRecord,
+    negative_control,
+    quality_summary,
+    score_records,
+)
 from app.evaluation.routing_report import format_breakdown, routing_breakdown
-from app.evaluation.runner import EvalRecord, Runner, RunSummary, summarize
+from app.evaluation.runner import EvalRecord, Runner, RunSummary, load_records, summarize
 from app.routing.policy import AUTO_MODEL
 
 DEFAULT_URL = "http://localhost:8000"
@@ -31,6 +39,27 @@ def format_summary(summary: RunSummary) -> str:
         f"  served   {served or 'nothing'}",
     ]
     return "\n".join(lines)
+
+
+def format_quality(summary: QualitySummary) -> str:
+    mean = "n/a" if summary.mean is None else f"{summary.mean:.3f}"
+    lines = [
+        f"quality of '{summary.run}': mean {mean} over {summary.scored}/{summary.items} items "
+        f"({summary.unscored} unscored, {summary.no_answer} without an answer, counted as 0)"
+    ]
+    for name, groups in (
+        ("method", summary.by_method),
+        ("difficulty", summary.by_difficulty),
+        ("category", summary.by_category),
+    ):
+        for key, group in groups.items():
+            lines.append(f"  {name:<10} {key:<10} {group.mean:.3f}  (n={group.n})")
+    return "\n".join(lines)
+
+
+def scores_path(results: Path) -> Path:
+    """Where the scores of a results file are written: next to it, ``<name>.scores.jsonl``."""
+    return results.with_name(results.stem + ".scores.jsonl")
 
 
 def choose_frontier(prices: PriceBook, requested: str | None) -> str:
@@ -118,7 +147,115 @@ def build_parser() -> argparse.ArgumentParser:
         help="accept answers shaped by the key's organisation policy (a pin or tier cap)",
     )
     _add_run_arguments(router, "router")
+    score = commands.add_parser(
+        "score", help="grade the answers in one or more results files for quality"
+    )
+    score.add_argument("results", nargs="+", type=Path, help="results file(s) from a run")
+    score.add_argument(
+        "--judge-model",
+        required=True,
+        help="the gateway model that grades open-ended answers (ideally not one being compared)",
+    )
+    score.add_argument("--base-url", default=os.environ.get("LLMROUTER_EVAL_URL", DEFAULT_URL))
+    score.add_argument("--api-key", default=os.environ.get("LLMROUTER_EVAL_KEY"))
+    score.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    score.add_argument("--concurrency", type=int, default=4)
+    score.add_argument("--timeout", type=float, default=120.0, help="seconds per request")
+    score.add_argument("--resume", action="store_true", help="keep scores already in the file")
+    score.add_argument(
+        "--negative-control",
+        action="store_true",
+        help="also grade a non-answer for every open-ended item, to see how generous the judge is",
+    )
+    score.add_argument(
+        "--allow-unscored", action="store_true", help="exit 0 even if some answers got no score"
+    )
     return parser
+
+
+async def _score(
+    benchmark: Benchmark,
+    runs: list[tuple[Path, list[EvalRecord]]],
+    *,
+    base_url: str,
+    api_key: str,
+    judge_model: str,
+    concurrency: int,
+    request_timeout: float,
+    resume: bool,
+    control: bool,
+) -> tuple[list[tuple[Path, list[ScoreRecord]]], list[ScoreRecord]]:
+    async with httpx.AsyncClient(
+        base_url=base_url, headers={"Authorization": f"Bearer {api_key}"}, timeout=request_timeout
+    ) as client:
+        judge = Judge(client, judge_model)
+        scored = []
+        for path, records in runs:
+            scores = await score_records(
+                records,
+                benchmark,
+                judge,
+                concurrency=concurrency,
+                out=scores_path(path),
+                resume=resume,
+            )
+            scored.append((path, scores))
+        floor = await negative_control(benchmark, judge, concurrency=concurrency) if control else []
+        return scored, floor
+
+
+def _main_score(args: argparse.Namespace) -> int:
+    try:
+        benchmark = load_benchmark(args.dataset)
+        runs = [(path, load_records(path)) for path in args.results]
+    except (DatasetError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    for path, records in runs:
+        if any(r.served_model == args.judge_model for r in records):
+            print(
+                f"warning: the judge model '{args.judge_model}' also wrote answers in {path}; "
+                "a model tends to grade its own style generously, so prefer another judge",
+                file=sys.stderr,
+            )
+    try:
+        scored, floor = asyncio.run(
+            _score(
+                benchmark,
+                runs,
+                base_url=args.base_url,
+                api_key=args.api_key,
+                judge_model=args.judge_model,
+                concurrency=args.concurrency,
+                request_timeout=args.timeout,
+                resume=args.resume,
+                control=args.negative_control,
+            )
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    status = 0
+    for path, scores in scored:
+        summary = quality_summary(scores, benchmark)
+        print(format_quality(summary))
+        print(f"scores written to {scores_path(path)}")
+        if summary.unscored and not args.allow_unscored:
+            print(
+                f"error: {summary.unscored} answer(s) in {path} could not be graded, so their "
+                "quality is unknown. Rerun with --resume, or pass --allow-unscored.",
+                file=sys.stderr,
+            )
+            status = 1
+    if args.negative_control:
+        values = [s.score for s in floor if s.score is not None]
+        generous = [s.item_id for s in floor if s.score]
+        mean = sum(values) / len(values) if values else float("nan")
+        print(
+            f"negative control: the judge gave a non-answer {mean:.3f} on average over "
+            f"{len(values)} open-ended items; {len(generous)} scored above zero {generous}"
+        )
+    return status
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -127,6 +264,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.api_key:
         print("error: give an API key with --api-key or LLMROUTER_EVAL_KEY", file=sys.stderr)
         return 2
+    if args.command == "score":
+        return _main_score(args)
     try:
         prices = PriceBook.from_file(args.config)
         benchmark = load_benchmark(args.dataset)

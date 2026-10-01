@@ -1,4 +1,4 @@
-.PHONY: install dev redis-up redis-down test-redis eval-baseline eval-router migrate migration admin-key test lint fmt typecheck check
+.PHONY: install dev redis-up redis-down test-redis eval-baseline eval-router eval-score migrate migration admin-key test lint fmt typecheck check
 
 install:
 	pip install -e ".[dev]"
@@ -24,6 +24,10 @@ eval-baseline:
 # the router's cost on the same prompts (model=auto); use a key from an unrestricted organisation
 eval-router:
 	python -m app.evaluation router
+
+# grade both runs; set JUDGE to a gateway model other than the ones being compared
+eval-score:
+	python -m app.evaluation score eval_results/baseline.jsonl eval_results/router.jsonl --judge-model $(JUDGE) --negative-control
 
 migrate:
 	alembic upgrade head
