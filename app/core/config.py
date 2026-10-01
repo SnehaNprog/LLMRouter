@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import dotenv_values
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     breaker_shared: bool = True
     # Keep a metadata-only log of every request that reaches a model (see app/usage/).
     request_log_enabled: bool = True
+    # Serve Prometheus metrics at /metrics. With a token set, scrapers must send it as a bearer
+    # token; without one the endpoint is open, so keep it on a private network.
+    metrics_enabled: bool = True
+    metrics_token: SecretStr | None = None
     # After an upstream 429 a deployment is left alone for the Retry-After the vendor gave, or
     # for throttle_cooldown seconds (doubling with each further 429 in a row) if it gave none;
     # never longer than throttle_max_cooldown. Other deployments and models serve meanwhile.

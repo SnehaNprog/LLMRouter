@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 Sleep = Callable[[float], Awaitable[None]]
 Admit = Callable[[str], Awaitable[bool]]
+# (deployment, outcome, seconds): called after every attempt on a deployment, including the ones
+# refused before a call was made. ``outcome`` is "success", "refused" or the error's class name.
+AttemptObserver = Callable[[Deployment, str, float], None]
 
 
 @dataclass
@@ -55,11 +58,13 @@ class Router:
         latency: LatencyTracker | None = None,
         clock: Callable[[], float] = time.perf_counter,
         breakers: BreakerBoard | None = None,
+        on_attempt: AttemptObserver | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy or RetryPolicy()
         self.latency = latency or LatencyTracker()
         self.breakers = breakers or BreakerBoard()
+        self._on_attempt = on_attempt
         self._rng = rng or random.Random()
         self._sleep = sleep
         self._clock = clock
@@ -93,14 +98,29 @@ class Router:
         Raises DeploymentUnavailable, without calling, if either breaker refuses.
         """
         await self.breakers.sync(deployment)
-        permit = self.breakers.acquire(deployment)
+        try:
+            permit = self.breakers.acquire(deployment)
+        except (DeploymentUnavailable, DeploymentThrottled):
+            self._observe(deployment, "refused", 0.0)
+            raise
+        started = self._clock()
         try:
             result = await call()
         except BaseException as exc:  # includes cancellation, which counts as neither
             permit.failure(exc)
+            self._observe(deployment, type(exc).__name__, self._clock() - started)
             raise
         permit.success()
+        self._observe(deployment, "success", self._clock() - started)
         return result
+
+    def _observe(self, deployment: Deployment, outcome: str, seconds: float) -> None:
+        if self._on_attempt is None:
+            return
+        try:
+            self._on_attempt(deployment, outcome, seconds)
+        except Exception:  # an observer's bug must never fail the call it observes
+            logger.exception("an attempt observer failed")
 
     async def _with_retries[T](
         self,

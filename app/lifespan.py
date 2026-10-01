@@ -11,6 +11,7 @@ from app.core.http import build_http_client
 from app.core.model_config import ConfigError, load_config
 from app.core.redis import build_redis_client, redis_ready
 from app.db.session import create_engine, create_session_factory, database_ready
+from app.metrics.registry import Metrics
 from app.quota.bucket import BucketStore
 from app.quota.budget import BudgetStore
 from app.quota.budget_limiter import BudgetLimiter
@@ -56,9 +57,11 @@ def make_lifespan(
         app.state.db_engine = engine
         app.state.db_session_factory = create_session_factory(engine)
         app.state.readiness_checks["database"] = partial(database_ready, engine)
+        metrics: Metrics = app.state.metrics
         app.state.request_logger = RequestLogger(
             app.state.db_session_factory, enabled=settings.request_log_enabled
         )
+        app.state.request_logger.add_sink(metrics.observe_chat)
         redis = build_redis_client(settings)  # lazy: Redis being down never blocks startup
         app.state.redis = redis
         guard = QuotaGuard(
@@ -98,6 +101,7 @@ def make_lifespan(
                     max_delay=settings.retry_max_delay,
                 ),
                 latency=LatencyTracker(settings.latency_ewma_alpha),
+                on_attempt=metrics.observe_attempt,
                 breakers=BreakerBoard(
                     BreakerSettings(
                         failure_threshold=settings.breaker_failure_threshold or None,
@@ -117,8 +121,12 @@ def make_lifespan(
                         else None
                     ),
                     sync_interval=settings.breaker_sync_interval,
+                    on_transition=metrics.observe_transition,
+                    on_throttle=metrics.observe_throttle,
                 ),
             )
+            metrics.set_models(registry.aliases())
+            metrics.bind(app.state.router)
             logger.info(
                 "model config loaded",
                 extra={"aliases": registry.aliases(), "deployments": len(registry)},

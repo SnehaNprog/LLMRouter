@@ -20,6 +20,7 @@ dependencies = [
     "aiosqlite==0.22.1",
     "alembic==1.20.1",
     "redis==8.1.0",
+    "prometheus-client==0.26.0",
 ]
 
 [project.optional-dependencies]

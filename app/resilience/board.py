@@ -155,12 +155,14 @@ class BreakerBoard:
         on_transition: Observer | None = None,
         shared: SharedBreakerStore | None = None,
         sync_interval: float = 1.0,
+        on_throttle: Callable[[Deployment, float], None] | None = None,
     ) -> None:
         self._settings = settings or BreakerSettings()
         self._clock = clock
         self._on_transition = on_transition
         self._shared = shared
         self._sync_interval = sync_interval
+        self._on_throttle = on_throttle
         self._synced_at: dict[str, float] = {}
         self._applying_shared = False  # True while opening a breaker on another replica's say-so
         self._pending: set[asyncio.Task[object]] = set()
@@ -279,6 +281,11 @@ class BreakerBoard:
         )
         if self._shared is not None:
             self._announce(self._shared.publish_open(self._throttle_key(deployment), seconds))
+        if self._on_throttle is not None:
+            try:
+                self._on_throttle(deployment, seconds)
+            except Exception:  # an observer's bug must never break the calls being protected
+                logger.exception("throttle observer failed")
         logger.warning(
             "deployment throttled by its vendor, leaving it alone",
             extra={"deployment": deployment.id, "cooldown": round(seconds, 3), "streak": streak},
@@ -369,6 +376,11 @@ class BreakerBoard:
         """Bring the breakers of these deployments up to date with what other replicas know."""
         if self._shared is not None:
             await asyncio.gather(*(self.sync(d) for d in deployments))
+
+    def throttled(self) -> dict[str, float]:
+        """Seconds still to wait, by deployment id, for each deployment now resting after a 429."""
+        remaining = {key: until - self._clock() for key, until in self._throttled_until.items()}
+        return {key: seconds for key, seconds in remaining.items() if seconds > 0}
 
     def states(self) -> dict[str, str]:
         """Every breaker made so far and its state, for inspection."""
