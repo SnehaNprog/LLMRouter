@@ -321,3 +321,80 @@ def test_no_dependency_on_a_request_path_is_a_plain_function() -> None:
             walk(route.dependant)
 
     assert sorted(set(offenders)) == [], "these would each cost a thread hop per request"
+
+
+# ---------- continuous integration ----------
+
+WORKFLOW: dict[Any, Any] = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+TRIGGERS = WORKFLOW[True] if True in WORKFLOW else WORKFLOW["on"]  # PyYAML reads `on` as True
+
+
+def steps_of(job: str) -> list[str]:
+    return [step.get("run", step.get("uses", "")) for step in WORKFLOW["jobs"][job]["steps"]]
+
+
+def test_ci_runs_on_every_push_and_on_pull_requests() -> None:
+    assert {"push", "pull_request"} <= set(TRIGGERS)
+    # a bare `push:` (no branch filter) is every branch
+    assert not (TRIGGERS["push"] or {}).get("branches")
+
+
+def test_ci_can_also_be_started_by_hand() -> None:
+    assert "workflow_dispatch" in TRIGGERS
+
+
+def test_a_newer_push_cancels_the_run_it_makes_pointless() -> None:
+    assert WORKFLOW["concurrency"]["cancel-in-progress"] is True
+    assert "github.ref" in WORKFLOW["concurrency"]["group"]
+
+
+def test_ci_has_only_read_access_to_the_repository() -> None:
+    assert WORKFLOW["permissions"] == {"contents": "read"}
+
+
+def test_the_quick_job_runs_every_check_make_check_runs() -> None:
+    steps = " | ".join(steps_of("check"))
+    for command in ("ruff check .", "ruff format --check .", "mypy", "pytest -q"):
+        assert command in steps, command
+    assert 'pip install -e ".[dev]"' in steps
+
+
+def test_ci_uses_the_python_the_project_asks_for() -> None:
+    for job in WORKFLOW["jobs"].values():
+        versions = [
+            s["with"]["python-version"] for s in job["steps"] if "setup-python" in s.get("uses", "")
+        ]
+        assert versions == ["3.12"]
+
+
+def test_actions_are_pinned_to_a_released_major_version() -> None:
+    for job in WORKFLOW["jobs"].values():
+        for step in job["steps"]:
+            uses = step.get("uses")
+            if uses:
+                assert re.search(r"@v\d+$", uses), uses  # never @main or @master
+
+
+def test_the_services_job_runs_the_suite_against_the_images_compose_uses() -> None:
+    services = WORKFLOW["jobs"]["services"]["services"]
+    assert services["postgres"]["image"] == SERVICES["postgres"]["image"]
+    assert services["redis"]["image"] == SERVICES["redis"]["image"]
+    assert "pytest -q" in " | ".join(steps_of("services"))
+
+
+def test_the_services_are_healthy_before_the_tests_start() -> None:
+    for name, service in WORKFLOW["jobs"]["services"]["services"].items():
+        assert "--health-cmd" in service["options"], name
+
+
+def test_the_environment_variables_ci_sets_are_the_ones_the_tests_read() -> None:
+    env = WORKFLOW["jobs"]["services"]["env"]
+    conftest = (ROOT / "tests/conftest.py").read_text()
+    assert set(env) == {"LLMROUTER_TEST_REDIS_URL", "LLMROUTER_TEST_POSTGRES_URL"}
+    for name in env:
+        assert name in conftest, name
+    assert env["LLMROUTER_TEST_REDIS_URL"].endswith("/15")  # the database the tests may flush
+
+
+def test_ci_needs_no_secrets() -> None:
+    assert "secrets." not in (ROOT / ".github/workflows/ci.yml").read_text()
