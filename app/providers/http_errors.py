@@ -6,6 +6,7 @@ import httpx
 from app.providers.errors import (
     AuthFailed,
     BadRequest,
+    GatewayOverloaded,
     ProviderDown,
     ProviderError,
     RateLimited,
@@ -56,6 +57,12 @@ async def translate_transport_errors(provider: str) -> AsyncIterator[None]:
     """Turn httpx timeouts and network failures into domain errors."""
     try:
         yield
+    except httpx.PoolTimeout as exc:
+        # Waiting for a free connection, which says nothing about the vendor: see GatewayOverloaded.
+        raise GatewayOverloaded(
+            f"{provider}: the gateway has reached its limit of concurrent upstream requests",
+            provider=provider,
+        ) from exc
     except httpx.TimeoutException as exc:
         raise Timeout(f"{provider}: request timed out", provider=provider) from exc
     except httpx.TransportError as exc:

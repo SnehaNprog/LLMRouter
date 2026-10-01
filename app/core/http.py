@@ -19,6 +19,6 @@ def build_http_client(settings: Settings) -> httpx.AsyncClient:
     )
 
 
-def get_http_client(request: Request) -> httpx.AsyncClient:
+async def get_http_client(request: Request) -> httpx.AsyncClient:
     client: httpx.AsyncClient = request.app.state.http_client
     return client

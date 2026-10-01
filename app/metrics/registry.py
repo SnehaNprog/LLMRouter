@@ -30,6 +30,7 @@ ATTEMPT_OUTCOMES = frozenset(
         "RateLimited",
         "AuthFailed",
         "BadRequest",
+        "GatewayOverloaded",
         "ContextLengthExceededError",
         "CancelledError",
     }

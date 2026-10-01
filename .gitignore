@@ -10,3 +10,6 @@ __pycache__/
 
 # Per-deployment settings (model names, endpoints, prices); copy config.example.yaml to make it
 config.yaml
+
+# output of `make load-test`
+loadtest.json

@@ -18,6 +18,7 @@ from app.auth.tenants import AdminConflictError
 from app.providers.errors import (
     AuthFailed,
     BadRequest,
+    GatewayOverloaded,
     ProviderError,
     RateLimited,
     Timeout,
@@ -70,6 +71,13 @@ def describe_provider_error(exc: ProviderError) -> tuple[int, ErrorBody]:
             "shortly",
             type="api_error",
             code="providers_unavailable",
+        )
+    if isinstance(exc, GatewayOverloaded):
+        return 503, ErrorBody(
+            message="The gateway is at its limit of concurrent requests to the model providers; "
+            "try again shortly",
+            type="api_error",
+            code="gateway_overloaded",
         )
     if isinstance(exc, RateLimited):
         return 429, ErrorBody(
@@ -136,6 +144,8 @@ async def _provider_error_handler(_: Request, exc: Exception) -> JSONResponse:
         headers = {"Retry-After": str(math.ceil(exc.retry_after))}
     elif isinstance(exc, DeploymentUnavailable):
         headers = {"Retry-After": str(max(1, math.ceil(exc.retry_after)))}
+    elif isinstance(exc, GatewayOverloaded):
+        headers = {"Retry-After": "1"}
     logger.warning(
         "upstream provider error",
         extra={"provider": exc.provider, "upstream_status": exc.upstream_status},

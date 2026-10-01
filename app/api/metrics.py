@@ -34,7 +34,7 @@ async def metrics_access(request: Request) -> None:
         )
 
 
-def get_metrics(request: Request) -> Metrics:
+async def get_metrics(request: Request) -> Metrics:
     metrics: Metrics = request.app.state.metrics
     return metrics
 

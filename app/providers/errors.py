@@ -51,6 +51,17 @@ class BadRequest(ProviderError):
     """The vendor rejected the request itself (other 4xx). Retrying cannot help."""
 
 
+class GatewayOverloaded(ProviderError):
+    """The gateway itself has no free connection to send the request on (its pool is exhausted).
+
+    Not the vendor's fault, so it never counts against a circuit breaker. Not retried either, and
+    no other model is tried: every model shares the same connections, so trying again would only
+    add to the queue that caused it.
+    """
+
+    retryable = False
+
+
 class ProviderDown(ProviderError):
     """The vendor is failing or unreachable (5xx, network error)."""
 

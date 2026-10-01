@@ -20,7 +20,7 @@ def default_readiness_checks() -> dict[str, ReadinessCheck]:
 
 
 @router.get("/health", summary="Liveness: the process is up")
-def health() -> dict[str, str]:
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 

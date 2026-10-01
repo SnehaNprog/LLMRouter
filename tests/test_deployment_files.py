@@ -286,3 +286,38 @@ def test_alembic_upgrades_a_database_named_only_by_the_environment(tmp_path: Pat
 
     assert result.returncode == 0, result.stderr
     assert database.exists()
+
+
+# ---------- no request path hops to a thread for nothing ----------
+
+
+def test_no_dependency_on_a_request_path_is_a_plain_function() -> None:
+    """FastAPI runs a plain ``def`` dependency in a worker thread. Ours only read an attribute,
+    so each would cost every request a thread hop (milliseconds once the gateway has gone idle
+    waiting on a model). Dependencies and endpoints must be ``async def`` unless they genuinely
+    block, which is listed here."""
+    import inspect
+
+    from fastapi.routing import APIRoute
+
+    from app.main import app
+
+    deliberately_threaded = {"scrape"}  # renders every metric: real CPU work, off the event loop
+    offenders: list[str] = []
+
+    def walk(dependant: Any) -> None:
+        call = dependant.call
+        if call is not None and not (
+            inspect.iscoroutinefunction(call) or inspect.isasyncgenfunction(call)
+        ):
+            name = getattr(call, "__name__", repr(call))
+            if name not in deliberately_threaded:
+                offenders.append(name)
+        for sub in dependant.dependencies:
+            walk(sub)
+
+    for route in app.routes:
+        if isinstance(route, APIRoute):
+            walk(route.dependant)
+
+    assert sorted(set(offenders)) == [], "these would each cost a thread hop per request"
