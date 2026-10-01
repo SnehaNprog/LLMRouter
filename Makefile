@@ -1,4 +1,4 @@
-.PHONY: install dev redis-up redis-down test-redis eval-baseline eval-router eval-score eval-report eval-models eval-sweep migrate migration admin-key test lint fmt typecheck check
+.PHONY: install dev redis-up redis-down test-redis test-postgres docker-build up down logs eval-baseline eval-router eval-score eval-report eval-models eval-sweep migrate migration admin-key test lint fmt typecheck check
 
 install:
 	pip install -e ".[dev]"
@@ -12,6 +12,25 @@ redis-up:
 
 redis-down:
 	docker compose down
+
+# Postgres, Redis, the migrations and the gateway, as containers (needs config.yaml and .env)
+docker-build:
+	docker compose build
+
+up:
+	docker compose up -d --build
+
+down:
+	docker compose down
+
+logs:
+	docker compose logs -f app
+
+# also runs the whole suite against a real Postgres: every app gets a database of its own on the
+# server, created and dropped by the tests. Start one first, e.g.
+#   docker run -d --rm --name pg-test -e POSTGRES_PASSWORD=test -p 15432:5432 postgres:17-alpine
+test-postgres:
+	LLMROUTER_TEST_POSTGRES_URL=postgresql://postgres:test@localhost:15432/postgres pytest -q
 
 # also runs the Redis tests against a real server (flushes database 15)
 test-redis:

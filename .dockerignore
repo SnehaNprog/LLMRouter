@@ -1,0 +1,22 @@
+# Nothing here belongs in the image: secrets, local state, caches, tests and tooling output.
+.git
+.github
+.venv
+.env
+.env.*
+!.env.example
+*.db
+*.egg-info
+__pycache__
+*.pyc
+.mypy_cache
+.pytest_cache
+.ruff_cache
+tests
+eval_results
+config.yaml
+docker-compose*.yml
+Dockerfile
+.dockerignore
+Makefile
+LICENSE

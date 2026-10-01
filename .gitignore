@@ -7,3 +7,6 @@ __pycache__/
 .ruff_cache/
 *.egg-info/
 *.db
+
+# Per-deployment settings (model names, endpoints, prices); copy config.example.yaml to make it
+config.yaml

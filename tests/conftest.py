@@ -1,7 +1,11 @@
+import asyncio
 import os
-from collections.abc import AsyncIterator, Iterator
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import asyncpg
 import fakeredis
 import httpx
 import pytest
@@ -10,6 +14,8 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from redis.asyncio import Redis
 from sqlalchemy import select
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.auth.service import create_api_key
 from app.core.config import Settings
@@ -17,6 +23,7 @@ from app.core.model_config import ModelConfig
 from app.core.redis import build_redis_client
 from app.db.base import Base
 from app.db.models import Tenant
+from app.db.session import create_engine
 from app.main import create_app
 from app.providers.base import Provider
 from app.providers.fake import FakeProvider
@@ -50,10 +57,57 @@ def registry_with(provider: Provider, **config_overrides: Any) -> ModelRegistry:
     return ModelRegistry([Deployment.create(model_config(**config_overrides), provider)])
 
 
+async def _postgres_admin(url: URL, statement: str) -> None:
+    connection = await asyncpg.connect(
+        user=url.username, password=url.password, host=url.host, port=url.port, database="postgres"
+    )
+    try:
+        await connection.execute(statement)
+    finally:
+        await connection.close()
+
+
+def _in_a_thread(coroutine: Awaitable[None]) -> None:
+    """Run a coroutine to completion from code that may already be inside an event loop."""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(asyncio.run, coroutine).result()  # type: ignore[arg-type]
+
+
 @pytest.fixture(autouse=True)
-def in_memory_database(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every app built in a test gets its own throwaway database, never ./llmrouter.db."""
-    monkeypatch.setenv("LLMROUTER_DATABASE_URL", TEST_DATABASE_URL)
+def throwaway_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every app built in a test gets its own throwaway database, never ./llmrouter.db.
+
+    An in-memory SQLite one by default. With LLMROUTER_TEST_POSTGRES_URL set (`make test-postgres`)
+    each app instead gets a database created on that server when it starts and dropped when the
+    test ends, so the whole suite can also run against Postgres. Tests that name a SQLite file
+    themselves keep it.
+    """
+    server = os.environ.get("LLMROUTER_TEST_POSTGRES_URL")
+    if not server:
+        monkeypatch.setenv("LLMROUTER_DATABASE_URL", TEST_DATABASE_URL)
+        yield
+        return
+    base = make_url(server).set(drivername="postgresql+asyncpg")
+    monkeypatch.setenv("LLMROUTER_DATABASE_URL", base.render_as_string(hide_password=False))
+    created: list[str] = []
+
+    def engine_with_own_database(url: str) -> AsyncEngine:
+        if (
+            make_url(url) != base
+        ):  # a URL the test chose itself (a SQLite file, a migrated database)
+            return create_engine(url)
+        name = f"llmrouter_test_{uuid.uuid4().hex[:12]}"
+        _in_a_thread(_postgres_admin(base, f'CREATE DATABASE "{name}"'))
+        created.append(name)
+        own = make_url(url).set(database=name)
+        return create_engine(own.render_as_string(hide_password=False))
+
+    monkeypatch.setattr("app.lifespan.create_engine", engine_with_own_database)
+    try:
+        yield
+    finally:
+        for name in created:
+            _in_a_thread(_postgres_admin(base, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
 
 
 @pytest.fixture(autouse=True)

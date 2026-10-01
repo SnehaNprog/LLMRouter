@@ -10,8 +10,6 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-from app.db.base import UTCDateTime
-
 revision: str = "0009"
 down_revision: str | None = "0008"
 branch_labels: str | Sequence[str] | None = None
@@ -22,7 +20,7 @@ def upgrade() -> None:
     op.create_table(
         "request_logs",
         sa.Column("id", sa.String(length=32), nullable=False),
-        sa.Column("created_at", UTCDateTime(), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("day", sa.String(length=10), nullable=False),
         sa.Column("request_id", sa.String(length=64), nullable=True),
         sa.Column("tenant_id", sa.String(length=32), nullable=False),

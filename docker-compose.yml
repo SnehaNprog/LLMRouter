@@ -1,10 +1,40 @@
-# Local services. `make redis-up` starts Redis; the app itself runs with `make dev`.
+# The whole stack: Postgres, Redis, a one-shot database migration, and the gateway.
+#
+#   cp .env.example .env && cp config.example.yaml config.yaml   # then edit both
+#   make up                                                       # build and start everything
+#
+# `make redis-up` still starts just Redis, for running the gateway with `make dev` on the host.
+#
+# The defaults below are for a laptop. In production set POSTGRES_PASSWORD to a long random
+# URL-safe value (letters and digits), keep the data stores off the public network, and put TLS in
+# front of the gateway.
+name: llmrouter
+
+x-database-url: &database_url
+  LLMROUTER_DATABASE_URL: postgresql+asyncpg://llmrouter:${POSTGRES_PASSWORD:-llmrouter-dev-only}@postgres:5432/llmrouter
+
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: llmrouter
+      POSTGRES_DB: llmrouter
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-llmrouter-dev-only}
+    # Not published to the host: the gateway reaches it over the compose network. To use psql from
+    # the host, run `docker compose exec postgres psql -U llmrouter` instead.
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llmrouter -d llmrouter"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--appendonly", "yes"]  # keep quota counters across restarts
     ports:
-      - "6379:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -13,5 +43,40 @@ services:
       timeout: 3s
       retries: 5
 
+  # Creates and upgrades the tables, then exits. The gateway starts only once it has succeeded, and
+  # running it separately means several gateway replicas never race to migrate.
+  migrate:
+    image: llmrouter:local
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *database_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    image: llmrouter:local
+    build: .
+    env_file:
+      - path: .env
+        required: false  # provider keys and settings; see .env.example
+    environment:
+      <<: *database_url
+      LLMROUTER_REDIS_URL: redis://redis:6379/0
+      LLMROUTER_CONFIG_PATH: /etc/llmrouter/config.yaml
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    volumes:
+      - ./config.yaml:/etc/llmrouter/config.yaml:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
+  pg-data:
   redis-data:

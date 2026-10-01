@@ -259,6 +259,7 @@ def test_compose_file_defines_a_pinned_redis_with_a_healthcheck() -> None:
 
     assert service["image"].startswith("redis:")
     assert not service["image"].endswith(":latest")
-    assert "6379:6379" in service["ports"]
+    # published for `make dev` on the host, but only to this machine
+    assert service["ports"] == ["127.0.0.1:${REDIS_PORT:-6379}:6379"]
     assert "redis-cli" in service["healthcheck"]["test"]
     assert "redis-data" in compose["volumes"]

@@ -18,6 +18,7 @@ dependencies = [
     "python-dotenv==1.2.4",
     "sqlalchemy[asyncio]==2.1.6",
     "aiosqlite==0.22.1",
+    "asyncpg==0.32.0",
     "alembic==1.20.1",
     "redis==8.1.0",
     "prometheus-client==0.26.0",
@@ -52,6 +53,10 @@ files = ["app", "tests"]
 mypy_path = "."
 explicit_package_bases = true
 namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = "asyncpg.*"
+ignore_missing_imports = true  # asyncpg ships no type information; only the tests call it
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
