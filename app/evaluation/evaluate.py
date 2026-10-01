@@ -129,12 +129,12 @@ def _facts(records: list[EvalRecord], scores: list[ScoreRecord]) -> RunFacts:
     )
 
 
-def _saved(baseline: list[float], router: list[float], idx: list[int]) -> float | None:
+def saved_ratio(baseline: list[float], router: list[float], idx: list[int]) -> float | None:
     base = sum(baseline[i] for i in idx)
     return None if base <= 0 else 1 - sum(router[i] for i in idx) / base
 
 
-def _retained(baseline: list[float], router: list[float], idx: list[int]) -> float | None:
+def retained_ratio(baseline: list[float], router: list[float], idx: list[int]) -> float | None:
     base = sum(baseline[i] for i in idx)
     return None if base <= 0 else sum(router[i] for i in idx) / base
 
@@ -210,10 +210,10 @@ def evaluate(
     all_idx = list(range(len(cost_ids)))
     q_idx = list(range(len(quality_ids)))
     cost_saved = Metric(
-        value=_saved(base_cost, route_cost, all_idx),
+        value=saved_ratio(base_cost, route_cost, all_idx),
         ci=bootstrap_ci(
             len(cost_ids),
-            lambda idx: _saved(base_cost, route_cost, idx),
+            lambda idx: saved_ratio(base_cost, route_cost, idx),
             resamples=resamples,
             seed=seed,
         )
@@ -221,10 +221,10 @@ def evaluate(
         else None,
     )
     retained = Metric(
-        value=_retained(base_q, route_q, q_idx),
+        value=retained_ratio(base_q, route_q, q_idx),
         ci=bootstrap_ci(
             len(quality_ids),
-            lambda idx: _retained(base_q, route_q, idx),
+            lambda idx: retained_ratio(base_q, route_q, idx),
             resamples=resamples,
             seed=seed,
         )
@@ -252,10 +252,10 @@ def evaluate(
             out[name] = GroupResult(
                 cost_pairs=len(cidx),
                 quality_pairs=len(qidx),
-                cost_saved=_saved(base_cost, route_cost, cidx),
+                cost_saved=saved_ratio(base_cost, route_cost, cidx),
                 baseline_quality=_mean([base_q[n] for n in qidx]),
                 router_quality=_mean([route_q[n] for n in qidx]),
-                quality_retained=_retained(base_q, route_q, qidx),
+                quality_retained=retained_ratio(base_q, route_q, qidx),
             )
         return out
 

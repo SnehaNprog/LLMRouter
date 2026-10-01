@@ -1,4 +1,4 @@
-.PHONY: install dev redis-up redis-down test-redis eval-baseline eval-router eval-score eval-report migrate migration admin-key test lint fmt typecheck check
+.PHONY: install dev redis-up redis-down test-redis eval-baseline eval-router eval-score eval-report eval-models eval-sweep migrate migration admin-key test lint fmt typecheck check
 
 install:
 	pip install -e ".[dev]"
@@ -28,6 +28,15 @@ eval-router:
 # grade both runs; set JUDGE to a gateway model other than the ones being compared
 eval-score:
 	python -m app.evaluation score eval_results/baseline.jsonl eval_results/router.jsonl --judge-model $(JUDGE) --negative-control
+
+# every tiered model answers the benchmark once (what the sweep replays); then score them with
+#   python -m app.evaluation score eval_results/model-*.jsonl --judge-model $(JUDGE)
+eval-models:
+	python -m app.evaluation models
+
+# cost against quality across routing thresholds, chosen on half the prompts, judged on the rest
+eval-sweep:
+	python -m app.evaluation sweep --json eval_results/sweep.json
 
 # cost saved, quality retained and latency, from the scored runs
 eval-report:

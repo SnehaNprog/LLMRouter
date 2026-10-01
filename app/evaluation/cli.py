@@ -22,6 +22,16 @@ from app.evaluation.quality import (
 )
 from app.evaluation.routing_report import format_breakdown, routing_breakdown
 from app.evaluation.runner import EvalRecord, Runner, RunSummary, load_records, summarize
+from app.evaluation.sweep import (
+    DEFAULT_TARGET,
+    STEP,
+    Setup,
+    SweepDataError,
+    format_sweep,
+    load_runs,
+    run_path,
+    sweep,
+)
 from app.routing.policy import AUTO_MODEL
 
 DEFAULT_URL = "http://localhost:8000"
@@ -111,13 +121,22 @@ async def _run(
         )
 
 
-def _add_run_arguments(sub: argparse.ArgumentParser, default_label: str) -> None:
-    sub.add_argument("--label", default=default_label, help="name of this run in the results")
+def _add_run_arguments(
+    sub: argparse.ArgumentParser, default_label: str, *, one_run: bool = True
+) -> None:
+    if one_run:
+        sub.add_argument("--label", default=default_label, help="name of this run in the results")
+        sub.add_argument(
+            "--out", type=Path, help="results file (default: eval_results/<label>.jsonl)"
+        )
+    else:
+        sub.add_argument(
+            "--runs-dir", type=Path, default=Path("eval_results"), help="where results are written"
+        )
     sub.add_argument("--base-url", default=os.environ.get("LLMROUTER_EVAL_URL", DEFAULT_URL))
     sub.add_argument("--api-key", default=os.environ.get("LLMROUTER_EVAL_KEY"))
     sub.add_argument("--config", type=Path, default=Path("config.yaml"), help="for prices")
     sub.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
-    sub.add_argument("--out", type=Path, help="results file (default: eval_results/<label>.jsonl)")
     sub.add_argument("--resume", action="store_true", help="skip items already answered in --out")
     sub.add_argument("--concurrency", type=int, default=4)
     sub.add_argument("--timeout", type=float, default=120.0, help="seconds per request")
@@ -172,6 +191,25 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument(
         "--allow-unscored", action="store_true", help="exit 0 even if some answers got no score"
     )
+    models = commands.add_parser(
+        "models",
+        help="ask every benchmark prompt of each tiered model in turn (what the sweep replays)",
+    )
+    models.add_argument("--alias", action="append", help="only these models (default: all tiered)")
+    _add_run_arguments(models, "", one_run=False)
+    sw = commands.add_parser(
+        "sweep",
+        help="replay the router at many thresholds from the per-model runs: cost against quality",
+    )
+    sw.add_argument("--runs-dir", type=Path, default=Path("eval_results"))
+    sw.add_argument("--config", type=Path, default=Path("config.yaml"))
+    sw.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    sw.add_argument("--baseline-model", help="the frontier alias (default: the config's only one)")
+    sw.add_argument("--target-retained", type=float, default=DEFAULT_TARGET)
+    sw.add_argument("--step", type=float, default=STEP, help="grid spacing for both ceilings")
+    sw.add_argument("--seed", type=int, default=0)
+    sw.add_argument("--resamples", type=int, default=2000)
+    sw.add_argument("--json", type=Path, dest="json_out", help="also write the report as JSON")
     ev = commands.add_parser(
         "evaluate",
         help="compare a router run with the baseline: cost saved, quality retained, latency",
@@ -191,6 +229,90 @@ def build_parser() -> argparse.ArgumentParser:
         "low end of the 95%% interval (established)",
     )
     return parser
+
+
+def _main_sweep(args: argparse.Namespace) -> int:
+    try:
+        setup = Setup(args.config)
+        benchmark = load_benchmark(args.dataset)
+        aliases = list(setup.tiered())
+        baseline_model = args.baseline_model
+        if baseline_model is None:
+            frontier = setup.frontier_aliases()
+            if len(frontier) != 1:
+                raise ValueError(
+                    f"the config has {len(frontier)} frontier-tier models {frontier}; "
+                    "say which one is the baseline with --baseline-model"
+                )
+            baseline_model = frontier[0]
+        elif baseline_model not in aliases:
+            raise ValueError(f"'{baseline_model}' is not a tiered model in the config: {aliases}")
+        runs = load_runs(args.runs_dir, aliases, benchmark, scores_path)
+        report = sweep(
+            setup,
+            benchmark,
+            runs,
+            baseline_model,
+            target_retained=args.target_retained,
+            step=args.step,
+            seed=args.seed,
+            resamples=args.resamples,
+        )
+    except (ConfigError, DatasetError, SweepDataError, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(format_sweep(report))
+    if args.json_out:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        print(f"report written to {args.json_out}")
+    return 0
+
+
+def _main_models(args: argparse.Namespace) -> int:
+    try:
+        setup = Setup(args.config)
+        prices = PriceBook(setup.configs)
+        benchmark = load_benchmark(args.dataset)
+        if args.category or args.difficulty or args.limit:
+            benchmark = benchmark.subset(
+                categories=set(args.category) if args.category else None,
+                difficulties=set(args.difficulty) if args.difficulty else None,
+                limit=args.limit,
+            )
+        aliases = list(setup.tiered())
+        if args.alias:
+            unknown = [a for a in args.alias if a not in aliases]
+            if unknown:
+                raise ValueError(f"not tiered models in the config: {unknown} (have {aliases})")
+            aliases = args.alias
+    except (ConfigError, DatasetError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    status = 0
+    for alias in aliases:
+        out = run_path(args.runs_dir, alias)
+        records = asyncio.run(
+            _run(
+                benchmark,
+                prices,
+                base_url=args.base_url,
+                api_key=args.api_key,
+                model=alias,
+                label=f"model-{alias}",
+                out=out,
+                resume=args.resume,
+                concurrency=args.concurrency,
+                request_timeout=args.timeout,
+            )
+        )
+        summary = summarize(records)
+        print(format_summary(summary))
+        print(f"results written to {out}")
+        if summary.failed and not args.allow_failures:
+            print(f"error: {summary.failed} item(s) failed for '{alias}'", file=sys.stderr)
+            status = 1
+    return status
 
 
 def _main_evaluate(args: argparse.Namespace) -> int:
@@ -331,12 +453,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "evaluate":
         return _main_evaluate(args)
+    if args.command == "sweep":
+        return _main_sweep(args)
 
     if not args.api_key:
         print("error: give an API key with --api-key or LLMROUTER_EVAL_KEY", file=sys.stderr)
         return 2
     if args.command == "score":
         return _main_score(args)
+    if args.command == "models":
+        return _main_models(args)
     try:
         prices = PriceBook.from_file(args.config)
         benchmark = load_benchmark(args.dataset)

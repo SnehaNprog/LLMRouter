@@ -1,6 +1,6 @@
 import json
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -150,6 +150,14 @@ class Benchmark:
             and (difficulties is None or item.difficulty in difficulties)
         ]
         return Benchmark(chosen[:limit] if limit is not None else chosen)
+
+    def only(self, ids: Collection[str]) -> "Benchmark":
+        """The items with these ids, in benchmark order; an id that is not here is an error."""
+        wanted = set(ids)
+        missing = wanted - {item.id for item in self.items}
+        if missing:
+            raise DatasetError(f"not in the benchmark: {sorted(missing)}")
+        return Benchmark([item for item in self.items if item.id in wanted])
 
     def counts(self) -> dict[str, dict[str, int]]:
         """How many items there are per category, per difficulty and per scoring kind."""

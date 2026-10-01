@@ -6,7 +6,7 @@ from app.core.tiers import Tier
 from app.router.cost import cost_usd
 
 
-class _AnyKey(Mapping[str, str]):
+class AnyKey(Mapping[str, str]):
     """An environment in which every variable is set, to a placeholder.
 
     Prices come from the same config the gateway uses, but pricing never calls a provider, so it
@@ -43,7 +43,10 @@ class PriceBook:
     @classmethod
     def from_file(cls, path: Path) -> "PriceBook":
         """The prices in a gateway model config (config errors are raised as ConfigError)."""
-        return cls(load_config(path, _AnyKey()).models)
+        return cls(load_config(path, AnyKey()).models)
+
+    def configs(self) -> list[ModelConfig]:
+        return [config for group in self._by_alias.values() for config in group]
 
     def __contains__(self, alias: object) -> bool:
         return alias in self._by_alias
