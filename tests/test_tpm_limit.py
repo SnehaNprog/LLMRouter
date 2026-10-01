@@ -28,11 +28,18 @@ from app.router.router import Served
 from app.router.tokens import estimate_text_tokens
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk, ChunkChoice, Delta
+from app.usage.record import LogEntry, RequestLogger
 from tests.conftest import AuthedClient
 from tests.test_db import alembic_config
 from tests.test_rpm_limit import Clock, chat, make_client
 
 KEY = "tpm-key"
+
+# the stream also logs the request; these tests are about the token settlement only
+NO_LOG = (
+    LogEntry(tenant_id="t", key_id="k", requested_model="m", stream=True),
+    RequestLogger(None),
+)
 
 
 def auth(tpm_limit: int | None = 1_000) -> AuthContext:
@@ -353,7 +360,7 @@ async def chunks(*items: ChatCompletionChunk) -> AsyncIterator[ChatCompletionChu
 async def test_a_client_disconnecting_mid_stream_still_settles() -> None:
     recorder = Recorder(reserved=500, prompt=8)
     first = text_chunk("a" * 40)  # about 10 tokens of text
-    stream = _event_stream(first, chunks(text_chunk("b" * 400)), recorder.quota, Served())
+    stream = _event_stream(first, chunks(text_chunk("b" * 400)), recorder.quota, Served(), *NO_LOG)
 
     await anext(stream)  # the client reads one event ...
     await stream.aclose()  # ... then goes away
@@ -365,7 +372,10 @@ async def test_a_stream_that_runs_dry_settles_on_what_was_sent() -> None:
     recorder = Recorder(reserved=500, prompt=8)
 
     events = [
-        e async for e in _event_stream(text_chunk("x" * 80), chunks(), recorder.quota, Served())
+        e
+        async for e in _event_stream(
+            text_chunk("x" * 80), chunks(), recorder.quota, Served(), *NO_LOG
+        )
     ]
 
     assert events[-1] == "data: [DONE]\n\n"
@@ -386,7 +396,9 @@ async def test_reported_usage_beats_the_estimate() -> None:
 
     _ = [
         e
-        async for e in _event_stream(text_chunk("x" * 400), chunks(usage), recorder.quota, Served())
+        async for e in _event_stream(
+            text_chunk("x" * 400), chunks(usage), recorder.quota, Served(), *NO_LOG
+        )
     ]
 
     assert recorder.settled_with == [42]
@@ -400,7 +412,10 @@ async def test_a_stream_that_fails_part_way_settles_on_what_was_sent() -> None:
         raise ProviderDown("reset", provider="p")
 
     events = [
-        e async for e in _event_stream(text_chunk("x" * 40), dying(), recorder.quota, Served())
+        e
+        async for e in _event_stream(
+            text_chunk("x" * 40), dying(), recorder.quota, Served(), *NO_LOG
+        )
     ]
 
     assert "upstream_unavailable" in events[-1]

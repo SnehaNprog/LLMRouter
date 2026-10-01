@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import math
 
@@ -90,6 +91,41 @@ def describe_provider_error(exc: ProviderError) -> tuple[int, ErrorBody]:
             message=exc.message, type="invalid_request_error", code="upstream_bad_request"
         )
     return 502, ErrorBody(message=exc.message, type="api_error", code="upstream_unavailable")
+
+
+def outcome_of(exc: BaseException) -> tuple[int, str | None]:
+    """The HTTP status and error code the client gets for an exception raised while serving.
+
+    Each case mirrors the handler registered for it below; a test sends every one of these
+    through the real API and checks that the two agree, so they cannot drift apart unnoticed.
+    A client that hangs up mid-request is recorded as 499, the status nginx made conventional.
+    """
+    if isinstance(exc, ProviderError):
+        status, body = describe_provider_error(exc)
+        return status, body.code
+    if isinstance(exc, AuthError):
+        return exc.status_code, exc.code
+    if isinstance(exc, UnknownModelError):
+        return 404, "model_not_found"
+    if isinstance(exc, ContextLengthExceededError):
+        return 400, "context_length_exceeded"
+    if isinstance(exc, RateLimitExceededError):
+        return 429, "rate_limit_exceeded"
+    if isinstance(exc, TokenLimitExceededError):
+        return 429, "request_too_large" if exc.too_large else "rate_limit_exceeded"
+    if isinstance(exc, BudgetExceededError):
+        return 429, "budget_exceeded"
+    if isinstance(exc, QuotaUnavailableError):
+        return 503, "quota_unavailable"
+    if isinstance(exc, TenantPolicyError):
+        if exc.kind == "no_model_under_cap":
+            return 403, "routing_policy_no_model"
+        return 503, "tenant_policy_invalid"
+    if isinstance(exc, StarletteHTTPException):
+        return exc.status_code, None
+    if isinstance(exc, asyncio.CancelledError):
+        return 499, "client_disconnected"
+    return 500, "internal_error"
 
 
 async def _provider_error_handler(_: Request, exc: Exception) -> JSONResponse:

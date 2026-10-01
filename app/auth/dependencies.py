@@ -92,6 +92,10 @@ async def authenticate(
         max_tier=None if key.tenant.routing_max_tier is None else Tier(key.tenant.routing_max_tier),
     )
     request.state.auth = context  # lets the access log say who made the call
+    # Authentication only reads. Ending its transaction hands the database connection back to
+    # the pool now, instead of holding it while the model works (seconds, for a completion):
+    # held that long, a handful of slow requests would use up the pool and starve everything else.
+    await session.rollback()
     return context
 
 

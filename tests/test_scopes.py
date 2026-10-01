@@ -31,7 +31,13 @@ from tests.test_db import alembic_config
 
 
 def test_known_scopes() -> None:
-    assert KNOWN_SCOPES == {"chat:write", "models:read", "admin:tenants", "admin:keys"}
+    assert KNOWN_SCOPES == {
+        "chat:write",
+        "models:read",
+        "usage:read",
+        "admin:tenants",
+        "admin:keys",
+    }
 
 
 def test_defaults_are_least_privilege() -> None:

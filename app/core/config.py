@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     # have told us at most every breaker_sync_interval seconds. Redis being down only turns this
     # off: each replica's own breakers keep working.
     breaker_shared: bool = True
+    # Keep a metadata-only log of every request that reaches a model (see app/usage/).
+    request_log_enabled: bool = True
     # After an upstream 429 a deployment is left alone for the Retry-After the vendor gave, or
     # for throttle_cooldown seconds (doubling with each further 429 in a row) if it gave none;
     # never longer than throttle_max_cooldown. Other deployments and models serve meanwhile.

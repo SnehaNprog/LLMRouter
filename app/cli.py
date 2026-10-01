@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.exc import OperationalError
 
@@ -9,6 +10,7 @@ from app.auth.bootstrap import bootstrap_admin
 from app.auth.service import TenantInactiveError
 from app.core.config import get_settings
 from app.db.session import create_engine, create_session_factory
+from app.usage.queries import prune_request_logs
 
 
 async def _create_admin(database_url: str, tenant: str, name: str) -> tuple[str, str, str]:
@@ -21,15 +23,40 @@ async def _create_admin(database_url: str, tenant: str, name: str) -> tuple[str,
         await engine.dispose()
 
 
+async def _prune_logs(database_url: str, days: int) -> int:
+    engine = create_engine(database_url)
+    try:
+        async with create_session_factory(engine)() as session:
+            return await prune_request_logs(session, datetime.now(UTC) - timedelta(days=days))
+    finally:
+        await engine.dispose()
+
+
 def main(argv: Sequence[str] | None = None, database_url: str | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli", description="LLMRouter admin tools")
     commands = parser.add_subparsers(dest="command", required=True)
     admin = commands.add_parser("create-admin", help="mint an admin API key (shown once)")
     admin.add_argument("--tenant", default="platform", help="tenant that owns the key")
     admin.add_argument("--name", default="bootstrap admin", help="label for the key")
+    prune = commands.add_parser("prune-logs", help="delete request logs older than some days")
+    prune.add_argument("--days", type=int, required=True, help="keep this many days of history")
     args = parser.parse_args(argv)
 
     url = database_url or get_settings().database_url
+    if args.command == "prune-logs":
+        if args.days < 1:
+            print("error: --days must be at least 1", file=sys.stderr)
+            return 2
+        try:
+            removed = asyncio.run(_prune_logs(url, args.days))
+        except OperationalError as exc:
+            print(
+                f"error: the database is not ready; run `make migrate` first ({exc.orig})",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"Deleted {removed} request log(s) older than {args.days} day(s).")
+        return 0
     try:
         tenant, prefix, secret = asyncio.run(_create_admin(url, args.tenant, args.name))
     except OperationalError as exc:

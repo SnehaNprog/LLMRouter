@@ -23,6 +23,7 @@ from app.router.registry import ModelRegistry, build_registry
 from app.router.retry import RetryPolicy
 from app.router.router import Router
 from app.routing.score import ComplexityWeights
+from app.usage.record import RequestLogger
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,9 @@ def make_lifespan(
         app.state.db_engine = engine
         app.state.db_session_factory = create_session_factory(engine)
         app.state.readiness_checks["database"] = partial(database_ready, engine)
+        app.state.request_logger = RequestLogger(
+            app.state.db_session_factory, enabled=settings.request_log_enabled
+        )
         redis = build_redis_client(settings)  # lazy: Redis being down never blocks startup
         app.state.redis = redis
         guard = QuotaGuard(

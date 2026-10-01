@@ -3,10 +3,11 @@ from collections.abc import Collection, Iterable
 # What a key may do. Scopes are "resource:action"; "resource:*" grants every action on a resource.
 CHAT_WRITE = "chat:write"
 MODELS_READ = "models:read"
+USAGE_READ = "usage:read"
 ADMIN_TENANTS = "admin:tenants"
 ADMIN_KEYS = "admin:keys"
 
-KNOWN_SCOPES = frozenset({CHAT_WRITE, MODELS_READ, ADMIN_TENANTS, ADMIN_KEYS})
+KNOWN_SCOPES = frozenset({CHAT_WRITE, MODELS_READ, USAGE_READ, ADMIN_TENANTS, ADMIN_KEYS})
 RESOURCES = frozenset(scope.split(":")[0] for scope in KNOWN_SCOPES)
 
 # Least privilege: a new key can call models, but never administer anything.

@@ -7,6 +7,8 @@ from app.api.errors import register_exception_handlers
 from app.api.health import default_readiness_checks
 from app.api.health import router as health_router
 from app.api.models import router as models_router
+from app.api.usage import admin as admin_usage_router
+from app.api.usage import own as usage_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.middleware import RequestIdMiddleware
@@ -28,8 +30,10 @@ def create_app(
     app.include_router(health_router)
     app.include_router(chat_router)
     app.include_router(models_router)
+    app.include_router(usage_router)
     app.include_router(admin_tenants_router)
     app.include_router(admin_keys_router)
+    app.include_router(admin_usage_router)
     return app
 
 

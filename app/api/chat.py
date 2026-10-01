@@ -6,8 +6,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from app.api.deps import get_budgets, get_limiter, get_router
-from app.api.errors import describe_provider_error
+from app.api.deps import get_budgets, get_limiter, get_request_logger, get_router
+from app.api.errors import describe_provider_error, outcome_of
 from app.auth.dependencies import AuthContext, require_scope
 from app.auth.errors import ModelNotAllowedError
 from app.auth.model_access import model_allowed
@@ -26,6 +26,7 @@ from app.routing.selector import RoutingChoice
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.completion import ChatCompletionChunk, ChatCompletionResponse
 from app.schemas.error import ErrorResponse
+from app.usage.record import LogEntry, RequestLogger
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,8 @@ async def _event_stream(
     rest: AsyncIterator[ChatCompletionChunk],
     quota: RequestQuota,
     served: Served,
+    entry: LogEntry,
+    request_logger: RequestLogger,
 ) -> AsyncGenerator[str]:
     """Relay chunks as server-sent events, then settle the quota, whatever happens.
 
@@ -63,6 +66,7 @@ async def _event_stream(
     """
     usage: tuple[int, int] | None = None  # (prompt tokens, completion tokens)
     sent: list[str] = []
+    finished = False
 
     def observe(chunk: ChatCompletionChunk) -> None:
         nonlocal usage
@@ -82,22 +86,29 @@ async def _event_stream(
     except ProviderError as exc:
         # Headers are already sent, so the failure is reported as an in-stream error event.
         _, body = describe_provider_error(exc)
+        entry.error_code = body.code  # the status stays 200: the response had already begun
         yield _sse(ErrorResponse(error=body).model_dump_json())
         return
     except Exception:
         logger.exception("unhandled error while streaming")
+        entry.error_code = "internal_error"
         fallback = ErrorResponse.of("Internal server error", "api_error")
         yield _sse(fallback.model_dump_json())
         return
     else:
+        finished = True
         yield _sse("[DONE]")
     finally:
+        if not finished and entry.error_code is None:
+            entry.error_code = "client_disconnected"
         prompt, completion = usage or (quota.prompt_tokens, estimate_text_tokens("".join(sent)))
         await asyncio.shield(
             quota.settle(
                 prompt_tokens=prompt, completion_tokens=completion, deployment=served.deployment
             )
         )
+        entry.succeed(prompt, completion)
+        await asyncio.shield(request_logger.write(entry))
 
 
 def _routing_headers(
@@ -128,7 +139,36 @@ async def create_chat_completion(
     gateway: Annotated[Router, Depends(get_router)],
     limiter: Annotated[RateLimiter, Depends(get_limiter)],
     budgets: Annotated[BudgetLimiter, Depends(get_budgets)],
+    request_logger: Annotated[RequestLogger, Depends(get_request_logger)],
     auth: Annotated[AuthContext, Depends(rate_limited_chat)],
+) -> Response:
+    entry = LogEntry(
+        tenant_id=auth.tenant_id,
+        key_id=auth.key_id,
+        requested_model=request.model,
+        stream=request.stream,
+    )
+    try:
+        return await _serve(
+            request, http_request, gateway, limiter, budgets, request_logger, auth, entry
+        )
+    except BaseException as exc:
+        # A request that failed is logged where it failed; one that succeeded was logged by
+        # _serve (or, for a stream, when the stream ended).
+        entry.fail(*outcome_of(exc))
+        await asyncio.shield(request_logger.write(entry))
+        raise
+
+
+async def _serve(
+    request: ChatCompletionRequest,
+    http_request: Request,
+    gateway: Router,
+    limiter: RateLimiter,
+    budgets: BudgetLimiter,
+    request_logger: RequestLogger,
+    auth: AuthContext,
+    entry: LogEntry,
 ) -> Response:
     # Checked before the model is looked up, so a key learns nothing about models it may not use.
     if not model_allowed(auth.allowed_models, request.model):
@@ -146,6 +186,7 @@ async def create_chat_completion(
         max_tier=auth.max_tier,
         healthy=gateway.is_healthy,
     )
+    entry.choice = choice
     escalation = choice.escalation if choice is not None else []
     if choice is not None:
         log_decision(choice, requested=AUTO_MODEL, tenant_id=auth.tenant_id, key_id=auth.key_id)
@@ -155,6 +196,7 @@ async def create_chat_completion(
     rate = rate_headers_of(http_request)
     rate.tokens = limiter.token_window(auth, quota.tokens)
     served = Served()
+    entry.served = served
     try:
         if not request.stream:
             completion = await gateway.complete(
@@ -166,6 +208,8 @@ async def create_chat_completion(
             )
             rate.tokens = limiter.token_window(auth, quota.tokens)  # now net of the real usage
             headers = {**rate.as_headers(), **_routing_headers(http_request, choice, served, auth)}
+            entry.succeed(prompt, generated)
+            await asyncio.shield(request_logger.write(entry))
             return JSONResponse(completion.model_dump(exclude_none=True), headers=headers)
 
         stream = gateway.stream(request, served, escalation=escalation, admit=quota.admit)
@@ -179,7 +223,7 @@ async def create_chat_completion(
         await asyncio.shield(quota.release())  # nothing was produced: give it all back
         raise
     return StreamingResponse(
-        _event_stream(first, stream, quota, served),
+        _event_stream(first, stream, quota, served, entry, request_logger),
         media_type="text/event-stream",
         # The headers go out before the stream does, so the token figures are as of the
         # reservation; the final usage is settled once the stream ends.

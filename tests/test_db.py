@@ -174,7 +174,7 @@ def test_migrations_create_the_tables(tmp_path: Path) -> None:
 
     command.upgrade(alembic_config(database), "head")
 
-    assert table_names(database) == {"tenants", "api_keys"}
+    assert table_names(database) == {"tenants", "api_keys", "request_logs"}
 
 
 def test_migrations_match_the_models(tmp_path: Path) -> None:
@@ -209,7 +209,7 @@ def test_upgrading_twice_is_harmless(tmp_path: Path) -> None:
     command.upgrade(config, "head")
     command.upgrade(config, "head")
 
-    assert table_names(database) == {"tenants", "api_keys"}
+    assert table_names(database) == {"tenants", "api_keys", "request_logs"}
 
 
 async def test_session_factory_commits_across_sessions(engine: AsyncEngine) -> None:
