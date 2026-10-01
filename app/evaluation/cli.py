@@ -9,11 +9,13 @@ import httpx
 
 from app.core.model_config import ConfigError
 from app.evaluation.dataset import DEFAULT_DATASET, Benchmark, DatasetError, load_benchmark
+from app.evaluation.evaluate import Targets, evaluate, format_report
 from app.evaluation.judge import Judge
 from app.evaluation.pricing import PriceBook
 from app.evaluation.quality import (
     QualitySummary,
     ScoreRecord,
+    load_scores,
     negative_control,
     quality_summary,
     score_records,
@@ -170,7 +172,74 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument(
         "--allow-unscored", action="store_true", help="exit 0 even if some answers got no score"
     )
+    ev = commands.add_parser(
+        "evaluate",
+        help="compare a router run with the baseline: cost saved, quality retained, latency",
+    )
+    ev.add_argument("--baseline", type=Path, default=Path("eval_results/baseline.jsonl"))
+    ev.add_argument("--router", type=Path, default=Path("eval_results/router.jsonl"))
+    ev.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
+    ev.add_argument("--json", type=Path, dest="json_out", help="also write the report as JSON")
+    ev.add_argument("--seed", type=int, default=0, help="fixes the bootstrap draws")
+    ev.add_argument("--resamples", type=int, default=2000, help="bootstrap resamples")
+    ev.add_argument("--target-cost-saved", type=float, default=Targets().cost_saved)
+    ev.add_argument("--target-quality-retained", type=float, default=Targets().quality_retained)
+    ev.add_argument(
+        "--require",
+        choices=["point", "established"],
+        help="exit 1 unless both targets are met by the best estimate (point) or even by the "
+        "low end of the 95%% interval (established)",
+    )
     return parser
+
+
+def _main_evaluate(args: argparse.Namespace) -> int:
+    try:
+        benchmark = load_benchmark(args.dataset)
+        baseline = load_records(args.baseline)
+        router = load_records(args.router)
+        baseline_scores = load_scores(scores_path(args.baseline))
+        router_scores = load_scores(scores_path(args.router))
+    except FileNotFoundError as exc:
+        print(
+            f"error: {exc.filename} not found; run the runs and `score` first "
+            "(see `make eval-baseline eval-router eval-score`)",
+            file=sys.stderr,
+        )
+        return 2
+    except (DatasetError, OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        report = evaluate(
+            benchmark,
+            baseline,
+            router,
+            baseline_scores,
+            router_scores,
+            targets=Targets(args.target_cost_saved, args.target_quality_retained),
+            seed=args.seed,
+            resamples=args.resamples,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(format_report(report))
+    if args.json_out:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        print(f"report written to {args.json_out}")
+    if args.require:
+        accepted = (
+            {"established"}
+            if args.require == "established"
+            else {"established", "point_estimate_only"}
+        )
+        failing = [c.name for c in report.claims if c.status not in accepted]
+        if failing:
+            print(f"error: not met ({args.require}): {', '.join(failing)}", file=sys.stderr)
+            return 1
+    return 0
 
 
 async def _score(
@@ -260,6 +329,8 @@ def _main_score(args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "evaluate":
+        return _main_evaluate(args)
 
     if not args.api_key:
         print("error: give an API key with --api-key or LLMROUTER_EVAL_KEY", file=sys.stderr)
