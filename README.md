@@ -1,5 +1,7 @@
 # LLMRouter
 
+[![CI](https://github.com/SnehaNprog/LLMRouter/actions/workflows/ci.yml/badge.svg)](https://github.com/SnehaNprog/LLMRouter/actions/workflows/ci.yml)
+
 An OpenAI-compatible gateway for large language models, written in FastAPI. It puts one API in
 front of several providers, gives each customer their own API keys, limits and budgets, and picks
 the cheapest model that is strong enough for each request, falling back or escalating when
