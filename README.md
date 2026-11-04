@@ -256,29 +256,6 @@ Project layout:
 | `app/loadtest/` | stand-in model, load generator, scenarios |
 | `migrations/` | Alembic migrations |
 
-## Résumé claims, checked against this repository
-
-The project was rebuilt from scratch after the original was lost. This table says which statements
-about it the repository itself supports.
-
-| Claim | Evidence | Status |
-|---|---|---|
-| OpenAI-compatible gateway in FastAPI | `app/api/chat.py`; tests drive it with the official OpenAI Python SDK | Supported by tests |
-| Multi-provider, async adapters | `app/providers/` (OpenAI-compatible and Anthropic), all `httpx` async | Supported by tests |
-| Virtual API keys | hashed storage, expiry, revoke, rotate (`app/auth/`) | Supported by tests |
-| Scoped RBAC | five scopes, privilege-escalation checks (`app/auth/scopes.py`) | Supported by tests |
-| Atomic Redis quotas | Lua token buckets; `tests/test_concurrent_quotas.py` (several replicas, real Redis); the load test sent 300 simultaneous requests at a 60-per-minute key and exactly 60 were allowed | Supported by tests and a measurement |
-| Secure multi-tenant isolation | tenant-scoped keys, usage and logs, tested for cross-tenant access; **not independently security-audited** | Tested, not audited |
-| Complexity-aware routing between SLMs and frontier models | `app/routing/` | Supported by tests |
-| Token-cost and latency scoring | cost and measured-latency ranking in `app/routing/selector.py` | Supported by tests |
-| Cross-provider circuit breakers | `app/resilience/`; the load test's outage run (upstream saw 12 of 500 requests once the breaker opened) | Supported by tests and a measurement |
-| **70% lower inference cost** | `make eval-report` | **Not reproduced.** Needs the evaluation run above. |
-| **93%+ quality retention** | `make eval-report` | **Not reproduced.** Needs the evaluation run above. |
-
-The two numbers came from the original, lost version of the project and **cannot be verified from this
-repository until the evaluation is run.** Run it, and put figures on a résumé only if
-`python -m app.evaluation evaluate --require established` passes; otherwise quote what the report
-actually shows (with its interval and prompt mix), or tune the thresholds with the sweep and re-measure.
 
 ## Limitations
 
