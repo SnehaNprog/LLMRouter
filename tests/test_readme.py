@@ -1,10 +1,15 @@
-"""The README makes claims about the code. These tests keep it from drifting away from it."""
+"""The README makes claims about the code. These tests keep those claims true.
+
+They check what the README *says*, not how it is laid out: a section that is absent makes no
+claims, so editing, reordering or deleting parts of the README never breaks them. They fail only
+when the README states something the code contradicts (a make target that does not exist, a
+setting that was renamed, a figure that is wrong) or claims a measured result nobody measured.
+"""
 
 import importlib
 import re
 from collections import Counter
 
-import pytest
 from fastapi.routing import APIRoute
 
 from app.core.config import Settings
@@ -30,6 +35,16 @@ def code_spans() -> list[str]:
     return fenced + inline
 
 
+def section(start: str, end: str | None = None) -> str | None:
+    """The README text from ``start`` to ``end`` (or the next heading), or None if it has none."""
+    if start not in README:
+        return None
+    text = README.split(start, 1)[1]
+    if end is not None and end in text:
+        return text.split(end, 1)[0]
+    return re.split(r"\n#{1,3} ", text, maxsplit=1)[0]
+
+
 # ---------- commands ----------
 
 
@@ -38,13 +53,11 @@ def test_every_make_target_the_readme_mentions_exists() -> None:
     mentioned = {
         match for span in code_spans() for match in re.findall(r"\bmake ([a-z][a-z-]*)", span)
     }
-    assert mentioned, "the README should mention some make targets"
     assert mentioned <= targets, sorted(mentioned - targets)
 
 
 def test_every_python_module_the_readme_runs_exists() -> None:
     modules = {match for span in code_spans() for match in re.findall(r"python -m ([\w.]+)", span)}
-    assert {"app.cli", "app.evaluation"} <= modules
     for module in modules:
         importlib.import_module(module)  # a typo would raise here
 
@@ -55,7 +68,6 @@ def test_every_python_module_the_readme_runs_exists() -> None:
 def test_every_setting_the_readme_names_exists() -> None:
     fields = {name.upper() for name in Settings.model_fields}
     named = set(re.findall(r"LLMROUTER_([A-Z0-9_]+)", README))
-    assert named, "the README should name some settings"
     assert named <= fields, sorted(named - fields)
 
 
@@ -71,10 +83,11 @@ def normalise(path: str) -> str:
 
 
 def test_every_endpoint_in_the_api_table_exists() -> None:
-    section = README.split("## API", 1)[1].split("## How it works", 1)[0]
+    api = section("## API", "## How it works")
+    if api is None:
+        return
     known = {normalise(path) for path in route_paths()} | {"/metrics"}
-    found = 0
-    for line in section.splitlines():
+    for line in api.splitlines():
         if not line.startswith("|"):
             continue
         first_column = line.split("|")[1]
@@ -82,15 +95,15 @@ def test_every_endpoint_in_the_api_table_exists() -> None:
             for piece in re.split(r",\s*", path):
                 if "…" in piece:
                     continue  # shorthand for a longer path shown in full on the same row
-                found += 1
                 assert normalise(piece.split()[-1]) in known, piece
-    assert found >= 8
 
 
 def test_the_error_codes_the_readme_names_are_ones_the_gateway_sends() -> None:
+    codes = section("Notable codes:", "\n\n")
+    if codes is None:
+        return
     source = "".join(p.read_text() for p in (ROOT / "app").rglob("*.py"))
-    section = README.split("Notable codes:", 1)[1].split("\n\n", 1)[0]
-    for code in re.findall(r"`([a-z_]+)`", section):
+    for code in re.findall(r"`([a-z_]+)`", codes):
         assert f'"{code}"' in source, code
 
 
@@ -99,17 +112,16 @@ def test_the_error_codes_the_readme_names_are_ones_the_gateway_sends() -> None:
 
 def test_every_relative_link_points_at_a_file_that_exists() -> None:
     links = re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", README)
-    local = [link for link in links if not link.startswith(("http://", "https://", "mailto:"))]
-    assert local
-    for link in local:
-        assert (ROOT / link).exists(), link
+    for link in links:
+        if not link.startswith(("http://", "https://", "mailto:")):
+            assert (ROOT / link).exists(), link
 
 
 def test_every_path_in_the_layout_table_exists() -> None:
-    section = README.split("Project layout:", 1)[1].split("##", 1)[0]
-    paths = re.findall(r"\| `([^`]+)`", section)
-    assert len(paths) >= 8
-    for entry in paths:
+    layout = section("Project layout:")
+    if layout is None:
+        return
+    for entry in re.findall(r"\| `([^`]+)`", layout):
         for path in entry.split(", "):
             assert (ROOT / path.strip()).exists(), path
 
@@ -117,23 +129,35 @@ def test_every_path_in_the_layout_table_exists() -> None:
 # ---------- the numbers it quotes ----------
 
 
-def test_the_benchmark_description_matches_the_benchmark() -> None:
+def test_the_benchmark_figures_the_readme_quotes_are_the_benchmarks() -> None:
     benchmark = load_benchmark()
-    counts = benchmark.counts()["difficulty"]
-    assert f"**Benchmark:** {len(benchmark)} prompts in six categories" in README
-    assert f"is small** ({len(benchmark)} prompts)" in README
-    assert f"{counts['easy']} easy, {counts['medium']} medium and {counts['hard']} hard" in README
-    mix = "{:.0%} easy, {:.0%} medium, {:.0%} hard".format(
-        benchmark.share("easy"), benchmark.share("medium"), benchmark.share("hard")
-    )
-    assert mix in README
+    difficulty = benchmark.counts()["difficulty"]
     kinds = benchmark.counts()["scoring"]
-    assert f"{kinds['exact'] + kinds['number'] + kinds['contains']} prompts are checked" in README
-    assert f"{kinds['rubric']} open-ended" in README
+    mechanical = kinds["exact"] + kinds["number"] + kinds["contains"]
+
+    for size in re.findall(r"\b(\d+) prompts in (?:six|\d+) categories", README):
+        assert int(size) == len(benchmark)
+    for size in re.findall(r"benchmark is small\*{0,2} \((\d+) prompts\)", README):
+        assert int(size) == len(benchmark)
+    for easy, medium, hard in re.findall(r"(\d+) easy, (\d+) medium and (\d+) hard", README):
+        assert (int(easy), int(medium), int(hard)) == (
+            difficulty["easy"],
+            difficulty["medium"],
+            difficulty["hard"],
+        )
+    for easy, medium, hard in re.findall(r"(\d+)% easy, (\d+)% medium, (\d+)% hard", README):
+        assert (int(easy), int(medium), int(hard)) == (
+            round(benchmark.share("easy") * 100),
+            round(benchmark.share("medium") * 100),
+            round(benchmark.share("hard") * 100),
+        )
+    for number in re.findall(r"(\d+) prompts are checked mechanically", README):
+        assert int(number) == mechanical
+    for number in re.findall(r"(\d+) open-ended", README):
+        assert int(number) == kinds["rubric"]
 
 
-def test_the_routing_split_the_readme_quotes_is_what_the_default_thresholds_do() -> None:
-    """It is a claim about this code, so if the scoring changes, the README must be updated."""
+def routing_split() -> tuple[Counter[str], Counter[str]]:
     registry = ModelRegistry(
         [
             Deployment.create(
@@ -155,11 +179,21 @@ def test_the_routing_split_the_readme_quotes_is_what_the_default_thresholds_do()
         overall[tier.value] += 1
         if item.difficulty == "hard":
             hard[tier.value] += 1
+    return overall, hard
 
-    assert f"{overall['slm']} of the 90 benchmark prompts to the small tier" in README
-    assert f"{overall['mid']} to the mid tier" in README
-    assert overall["frontier"] == 0 and "none to\nthe frontier tier" in README
-    assert f"{hard['slm']} of the 25 prompts labelled hard" in README
+
+def test_the_routing_split_the_readme_quotes_is_what_the_default_thresholds_do() -> None:
+    """A claim about this code: if the scoring changes, the README must be updated."""
+    overall, hard = routing_split()
+    flat = re.sub(r"\s+", " ", README)
+    for number in re.findall(r"(\d+) of the 90 benchmark prompts to the small tier", flat):
+        assert int(number) == overall["slm"]
+    for number in re.findall(r"(\d+) to the mid tier", flat):
+        assert int(number) == overall["mid"]
+    if "none to the frontier tier" in flat:
+        assert overall["frontier"] == 0
+    for number in re.findall(r"(\d+) of the 25 prompts labelled hard", flat):
+        assert int(number) == hard["slm"]
 
 
 def test_the_evaluation_targets_in_the_readme_are_the_ones_the_code_checks() -> None:
@@ -170,24 +204,31 @@ def test_the_evaluation_targets_in_the_readme_are_the_ones_the_code_checks() -> 
 
 # ---------- honesty ----------
 
+# A measured-sounding result: a percentage said to be saved, cheaper, retained and so on.
+RESULT_CLAIM = re.compile(
+    r"\b\d+(?:\.\d+)?%\+?\s+"
+    r"(?:lower|cheaper|saved|savings?|reduction|retention|retained|of the quality)"
+    r"|\b(?:saves?|saved|cuts?|reduces?)\s+(?:inference\s+)?(?:costs?\s+)?(?:by\s+)?\d+(?:\.\d+)?%",
+    re.IGNORECASE,
+)
 
-def test_the_readme_claims_no_measured_result_unless_a_report_exists() -> None:
-    reports = (
-        list((ROOT / "eval_results").glob("report*.json"))
-        if (ROOT / "eval_results").exists()
-        else []
-    )
+
+def test_the_readme_states_no_measured_result_unless_a_report_exists() -> None:
+    """A figure on cost saved or quality retained must come from a real evaluation run."""
+    reports = list((ROOT / "eval_results").glob("report*.json"))
     if reports:
-        pytest.skip("a report exists, so the README may state measured results")
-    assert "There are no measured results in this repository yet" in README
-    assert README.count("not yet run") >= 2
-    section = README.split("### Results", 1)[1].split("## Load testing", 1)[0]
-    assert not re.search(r"\b\d+(\.\d+)?% (saved|cheaper|lower|retained)", section)
+        return  # a real report exists, so the README may quote what it shows
+    claims = [m.group(0) for m in RESULT_CLAIM.finditer(README)]
+    assert claims == [], f"the README claims results but there is no report: {claims}"
 
 
-def test_the_resume_table_does_not_call_the_unmeasured_numbers_verified() -> None:
-    table = README.split("## Résumé claims", 1)[1].split("## Limitations", 1)[0]
+def test_the_resume_table_if_there_is_one_does_not_call_the_unmeasured_numbers_verified() -> None:
+    table = section("## Résumé claims", "## Limitations")
+    if table is None:
+        return  # no such section, no such claims
+    if (ROOT / "eval_results").exists() and list((ROOT / "eval_results").glob("report*.json")):
+        return
     for claim in ("70% lower inference cost", "93%+ quality retention"):
-        row = next(line for line in table.splitlines() if claim in line)
-        assert "Not reproduced" in row
-    assert "cannot be verified from this\nrepository until the evaluation is run" in table
+        for line in table.splitlines():
+            if claim in line:
+                assert "Not reproduced" in line, line

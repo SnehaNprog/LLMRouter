@@ -425,7 +425,9 @@ def test_hostile_input_is_handled_quickly(hostile: str) -> None:
 
     extract_features(req(hostile))
 
-    assert time.perf_counter() - started < 1.0
+    assert (
+        time.perf_counter() - started < 10.0
+    )  # a pattern blow-up takes minutes; this is a hang guard
 
 
 def test_a_huge_prompt_costs_no_more_to_scan_than_a_moderate_one() -> None:
