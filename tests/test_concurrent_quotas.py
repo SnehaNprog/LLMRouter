@@ -5,7 +5,9 @@ be) that share one database file and one Redis, then fires many requests at all 
 However the requests interleave, the limits must hold exactly.
 """
 
+import asyncio
 import os
+import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -49,6 +51,7 @@ class Replicas:
     apps: list[FastAPI]
     providers: list[FakeProvider]
     tenant_id: str
+    gate: threading.Event | None = None  # see `replicas(hold=True)`
     _keys: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -116,7 +119,29 @@ class Replicas:
             return key, response
 
         with ThreadPoolExecutor(max_workers=count) as pool:  # one thread each: all at once
-            return list(pool.map(one, range(count)))
+            futures = [pool.submit(one, index) for index in range(count)]
+            if self.gate is not None:
+                self._release_when_decided(futures, count)
+            return [future.result() for future in futures]
+
+    def _release_when_decided(self, futures: list[Any], count: int) -> None:
+        """Let the admitted requests finish only once every request has been decided.
+
+        Each request is either refused (and has already answered) or admitted (and is waiting at
+        its provider). When those two add up to the whole burst, every decision has been made, and
+        none of them could have been affected by a reply finishing and handing back what it did
+        not use. That is the situation these tests describe, and holding the replies is how they
+        get it on a machine of any speed instead of hoping a fixed delay is long enough.
+        """
+        assert self.gate is not None
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            answered = sum(1 for future in futures if future.done())
+            waiting = sum(provider.calls for provider in self.providers)
+            if answered + waiting >= count:
+                break
+            time.sleep(0.01)
+        self.gate.set()
 
     async def hash_field(self, name: str, field_name: str) -> float:
         return float(await self.redis.hget(name, field_name))
@@ -129,8 +154,15 @@ def replicas(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     latency: float = 0.0,
+    hold: bool = False,
     **settings: Any,
 ) -> Iterator[Replicas]:
+    """Start ``count`` replicas that share a database and a Redis.
+
+    ``hold`` makes every provider wait, after it has been called, until the test says the burst
+    has been decided (see ``Replicas.fire``), instead of for a fixed time.
+    """
+    gate = threading.Event() if hold else None
     monkeypatch.setenv("LLMROUTER_DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path}/shared.db")
     if backend == "real":
         url = os.environ.get("LLMROUTER_TEST_REDIS_URL")
@@ -147,8 +179,15 @@ def replicas(
 
     providers: list[FakeProvider] = []
 
+    async def wait_for_gate(_: float) -> None:
+        assert gate is not None
+        await asyncio.get_running_loop().run_in_executor(None, gate.wait, 120.0)
+
     def registry_factory(_: httpx.AsyncClient) -> ModelRegistry:
-        provider = FakeProvider(latency=latency)
+        if gate is not None:
+            provider = FakeProvider(latency=1.0, sleep=wait_for_gate)  # the delay is the gate
+        else:
+            provider = FakeProvider(latency=latency)
         providers.append(provider)
         return ModelRegistry([Deployment.create(model_config(**PRICES), provider)])
 
@@ -171,7 +210,7 @@ def replicas(
                 return tenant.id
 
         tenant_id = first.call(prepare)
-        yield Replicas(clients, apps, providers, tenant_id)
+        yield Replicas(clients, apps, providers, tenant_id, gate)
         first.call(apps[0].state.redis.flushdb)
 
 
@@ -267,14 +306,19 @@ def test_the_token_allowance_is_never_oversubscribed(
     backend: str, replica_count: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Each request reserves 100 of 1,000 tokens; the provider's delay keeps them all in flight."""
-    with replicas(replica_count, backend, tmp_path, monkeypatch, latency=0.6) as world:
+    with replicas(replica_count, backend, tmp_path, monkeypatch, hold=True) as world:
         secret, _ = world.issue_key(tpm_limit=1_000)
 
+        started = time.monotonic()
         results = world.fire(secret, max_tokens=92)
+        elapsed = time.monotonic() - started
 
-        assert count(results, 200) == LIMIT
-        assert count(results, 429) == REQUESTS - LIMIT
-        assert calls(world) == LIMIT
+        # The bucket also refills (1,000 a minute is one reservation every six seconds), so a
+        # slow machine may let one more through; it must never be more than that.
+        allowed = count(results, 200)
+        assert LIMIT <= allowed <= LIMIT + int(elapsed // 6)
+        assert count(results, 429) == REQUESTS - allowed
+        assert calls(world) == allowed
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -282,18 +326,24 @@ def test_every_token_reservation_is_settled_afterwards(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """After the burst, only what the ten real replies used is gone: refusals leaked nothing."""
-    with replicas(3, backend, tmp_path, monkeypatch, latency=0.6) as world:
+    with replicas(3, backend, tmp_path, monkeypatch, hold=True) as world:
         secret, key_id = world.issue_key(tpm_limit=1_000)
 
-        world.fire(secret, max_tokens=92)
+        started = time.monotonic()
+        results = world.fire(secret, max_tokens=92)
 
         portal = world.clients[0].portal
         assert portal is not None
         tokens = portal.call(world.hash_field, f"llmrouter:quota:tpm:{key_id}", "tokens")
+        elapsed = time.monotonic() - started
 
-    # 1,000 minus ten replies of 15 tokens, plus a little refill. Unsettled reservations would
-    # leave it near zero; leaked refusals would leave it lower than this.
-    assert 840 <= tokens <= 880
+    # 1,000 minus a reply of 15 tokens for each one admitted, plus refill (1,000 a minute) for
+    # as long as the test took. Unsettled reservations would leave it near zero; leaked refusals
+    # would leave it lower than this.
+    admitted = count(results, 200)
+    assert admitted >= LIMIT
+    expected = 1_000 - 15 * admitted
+    assert expected - 10 <= tokens <= expected + 17 * elapsed + 10
 
 
 # ---------- money ----------
@@ -305,7 +355,7 @@ def test_the_key_budget_is_never_overspent(
     backend: str, replica_count: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The budget covers exactly ten worst-case reservations of $0.0018."""
-    with replicas(replica_count, backend, tmp_path, monkeypatch, latency=0.6) as world:
+    with replicas(replica_count, backend, tmp_path, monkeypatch, hold=True) as world:
         secret, key_id = world.issue_key(monthly_budget_usd=LIMIT * RESERVED_USD)
 
         results = world.fire(secret, max_tokens=5)
@@ -328,7 +378,7 @@ def test_the_key_budget_is_never_overspent(
 def test_the_tighter_of_key_and_tenant_budget_wins_and_both_stay_in_step(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with replicas(3, backend, tmp_path, monkeypatch, latency=0.6) as world:
+    with replicas(3, backend, tmp_path, monkeypatch, hold=True) as world:
         secret, key_id = world.issue_key(monthly_budget_usd=LIMIT * RESERVED_USD)
         world.set_tenant_budget(6 * RESERVED_USD)  # the organisation can afford only six
 
@@ -350,7 +400,7 @@ def test_the_tighter_of_key_and_tenant_budget_wins_and_both_stay_in_step(
 def test_one_tenants_budget_is_shared_by_all_its_keys_under_load(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with replicas(3, backend, tmp_path, monkeypatch, latency=0.6) as world:
+    with replicas(3, backend, tmp_path, monkeypatch, hold=True) as world:
         secrets = [world.issue_key()[0] for _ in range(5)]  # five keys, none capped itself
         world.set_tenant_budget(8 * RESERVED_USD)
 
@@ -368,7 +418,7 @@ def test_all_the_limits_together_still_let_exactly_the_tightest_through(
     backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Requests, tokens and money are all limited at once; whichever is tightest governs."""
-    with replicas(3, backend, tmp_path, monkeypatch, latency=0.6) as world:
+    with replicas(3, backend, tmp_path, monkeypatch, hold=True) as world:
         secret, _ = world.issue_key(
             rpm_limit=50,  # fifty requests
             tpm_limit=400,  # 400 tokens: thirty reservations of 13 (max_tokens=5)
