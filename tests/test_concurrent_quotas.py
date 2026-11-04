@@ -180,8 +180,17 @@ def replicas(
     providers: list[FakeProvider] = []
 
     async def wait_for_gate(_: float) -> None:
+        """Wait for the gate without a thread. Parking each held request in the event loop's
+        thread pool would starve it on a small machine (it has cpu_count + 4 threads), and
+        connecting to a real Redis needs that pool: connections would time out and the quota
+        guard, as designed, would fail open and wave requests through."""
         assert gate is not None
-        await asyncio.get_running_loop().run_in_executor(None, gate.wait, 120.0)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 120.0
+        # Polling is deliberate: the gate is shared by several event loops (one per replica),
+        # which an asyncio or anyio Event cannot be.
+        while not gate.is_set() and loop.time() < deadline:  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
 
     def registry_factory(_: httpx.AsyncClient) -> ModelRegistry:
         if gate is not None:
