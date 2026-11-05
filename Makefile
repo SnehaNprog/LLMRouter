@@ -1,4 +1,4 @@
-.PHONY: install dev redis-up redis-down test-redis test-postgres docker-build up down logs load-test eval-baseline eval-router eval-score eval-report eval-models eval-sweep migrate migration admin-key test lint fmt typecheck check
+.PHONY: install dev redis-up redis-down test-redis test-postgres test-slow docker-build up down logs load-test eval-baseline eval-router eval-score eval-report eval-models eval-sweep migrate migration admin-key test lint fmt typecheck check
 
 install:
 	pip install -e ".[dev]"
@@ -29,6 +29,11 @@ logs:
 # measure the gateway against a stand-in model, no real model needed (see docs/load-test.md)
 load-test:
 	python -m app.loadtest run --generators 4 --json loadtest.json
+
+# every HTTP request and Redis command is made slower, to expose tests that quietly assume speed;
+# they fail here every time instead of now and then on a busy CI runner
+test-slow:
+	LLMROUTER_TEST_SLOW_MS=40 pytest -q
 
 # also runs the whole suite against a real Postgres: every app gets a database of its own on the
 # server, created and dropped by the tests. Start one first, e.g.

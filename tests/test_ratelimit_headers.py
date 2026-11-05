@@ -1,4 +1,5 @@
 import re
+import time
 from typing import Any
 
 import httpx
@@ -12,6 +13,7 @@ from app.quota.headers import RateHeaders, Window, format_duration
 from app.quota.limiter import RateLimiter
 from app.quota.reservation import NO_RESERVATION
 from tests.test_rpm_limit import auth, chat, make_client
+from tests.timing import balance_range, refill_since
 
 ALL = {
     f"x-ratelimit-{part}-{kind}"
@@ -93,7 +95,9 @@ def test_responses_carry_the_openai_style_headers() -> None:
     with make_client() as client:
         secret = client.issue_key(rpm_limit=6, tpm_limit=1_000)
 
+        started = time.monotonic()
         response = chat(client, secret, max_tokens=92)  # reserves 100 tokens, uses 15
+        low, high = balance_range(15, started)
 
     headers = ratelimit_headers(response)
     assert set(headers) == ALL
@@ -101,7 +105,7 @@ def test_responses_carry_the_openai_style_headers() -> None:
     assert headers["x-ratelimit-remaining-requests"] == "5"
     assert headers["x-ratelimit-reset-requests"] == "10s"  # one missing request at 6 a minute
     assert headers["x-ratelimit-limit-tokens"] == "1000"
-    assert 983 <= int(headers["x-ratelimit-remaining-tokens"]) <= 985  # 1000 - 15 really used
+    assert low <= int(headers["x-ratelimit-remaining-tokens"]) <= high  # 1000 - 15 really used
     assert re.fullmatch(r"\d+ms", headers["x-ratelimit-reset-tokens"])
 
 
@@ -123,11 +127,14 @@ def test_token_figures_reflect_what_was_really_used_not_what_was_reserved() -> N
     with make_client(heavy) as client:
         secret = client.issue_key(tpm_limit=2_000)
 
+        started = time.monotonic()
         first = chat(client, secret, max_tokens=92)  # reserves only 100, uses 500
         second = chat(client, secret, max_tokens=92)
+        after_one = balance_range(500, started, limit=2_000)
+        after_two = balance_range(1_000, started, limit=2_000)
 
-    assert 1_498 <= int(first.headers["x-ratelimit-remaining-tokens"]) <= 1_501
-    assert 996 <= int(second.headers["x-ratelimit-remaining-tokens"]) <= 1_004
+    assert after_one[0] <= int(first.headers["x-ratelimit-remaining-tokens"]) <= after_one[1]
+    assert after_two[0] <= int(second.headers["x-ratelimit-remaining-tokens"]) <= after_two[1]
 
 
 def test_an_overrun_shows_zero_remaining_never_a_negative_number() -> None:
@@ -206,12 +213,14 @@ def test_streams_report_the_figures_as_of_the_reservation() -> None:
 def test_a_finished_stream_is_settled_before_the_next_request_reports() -> None:
     with make_client() as client:
         secret = client.issue_key(tpm_limit=1_000)
+        started = time.monotonic()
         chat(client, secret, stream=True, max_tokens=92)  # reserves 100, really uses about 15
 
         follow_up = chat(client, secret, max_tokens=92)
+        low, high = balance_range(30, started)
 
     # Had the stream's reservation not been settled, only ~885 would be left.
-    assert 965 <= int(follow_up.headers["x-ratelimit-remaining-tokens"]) <= 976
+    assert low <= int(follow_up.headers["x-ratelimit-remaining-tokens"]) <= high
 
 
 # ---------- on refusals ----------
@@ -238,16 +247,24 @@ def test_a_token_refusal_reports_both_allowances() -> None:
     heavy = FakeProvider(prompt_tokens=400, completion_tokens=400)
     with make_client(heavy) as client:
         secret = client.issue_key(rpm_limit=6, tpm_limit=1_000)
+        started = time.monotonic()
         chat(client, secret)  # leaves ~200 tokens
 
         response = chat(client, secret)
+        low, high = balance_range(800, started)
+        refilled = refill_since(started, 1_000)
 
     assert response.status_code == 429
     headers = ratelimit_headers(response)
     assert set(headers) == ALL
     assert headers["x-ratelimit-remaining-requests"] == "4"  # this attempt used a request
-    assert 199 <= int(headers["x-ratelimit-remaining-tokens"]) <= 203
-    assert re.fullmatch(r"4[78](\.\d+)?s", headers["x-ratelimit-reset-tokens"])  # ~800 to refill
+    assert low <= int(headers["x-ratelimit-remaining-tokens"]) <= high
+    # About 800 tokens are missing, less whatever has refilled; 1,000 a minute is 16.7 a second.
+    reset = re.fullmatch(r"(\d+(?:\.\d+)?)s", headers["x-ratelimit-reset-tokens"])
+    assert reset is not None
+    assert (
+        (800 - refilled - 10) / (1_000 / 60) - 1 <= float(reset.group(1)) <= 810 / (1_000 / 60) + 1
+    )
     assert "Retry-After" in response.headers
 
 
@@ -377,10 +394,12 @@ def test_the_figures_agree_on_a_real_redis(backend: str, monkeypatch: pytest.Mon
         client.portal.call(app.state.redis.flushdb)  # type: ignore[attr-defined]
         secret = client.issue_key(rpm_limit=6, tpm_limit=1_000)
 
+        started = time.monotonic()
         responses = [chat(client, secret, max_tokens=92) for _ in range(3)]
+        low, high = balance_range(45, started)
         client.portal.call(app.state.redis.flushdb)  # type: ignore[attr-defined]
 
     remaining = [int(r.headers["x-ratelimit-remaining-requests"]) for r in responses]
     tokens = [int(r.headers["x-ratelimit-remaining-tokens"]) for r in responses]
     assert remaining == [5, 4, 3]
-    assert tokens[0] >= tokens[1] - 1 and 940 <= tokens[2] <= 975  # 15 used per request
+    assert tokens[0] >= tokens[1] - 1 and low <= tokens[2] <= high  # 15 used per request

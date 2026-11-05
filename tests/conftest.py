@@ -110,6 +110,50 @@ def throwaway_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             _in_a_thread(_postgres_admin(base, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
 
 
+SLOW_MS = float(os.environ.get("LLMROUTER_TEST_SLOW_MS", "0") or 0)
+
+
+@pytest.fixture(autouse=True)
+def slow_machine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend the machine is slow: add a delay to every HTTP request and Redis command.
+
+    Off by default. With LLMROUTER_TEST_SLOW_MS=40 (`make test-slow`) each request takes 40 ms
+    longer and each Redis command 8 ms, so a test that quietly assumes things happen quickly (a
+    token bucket that "refills only a little", a window that "has not passed yet") fails here, on
+    purpose and every time, instead of once in a while on a busy CI runner. A test must hold on any
+    machine speed to pass in both modes.
+    """
+    if not SLOW_MS:
+        return
+    import time
+
+    from redis.asyncio.client import Redis as RedisClient
+    from starlette.testclient import _TestClientTransport
+
+    http_delay, redis_delay = SLOW_MS / 1000, SLOW_MS / 5000
+    sync_request: Any = _TestClientTransport.handle_request
+    async_request: Any = httpx.ASGITransport.handle_async_request
+    command: Any = RedisClient.execute_command
+
+    def slow_sync(self: Any, request: httpx.Request) -> httpx.Response:
+        time.sleep(http_delay)
+        response: httpx.Response = sync_request(self, request)
+        return response
+
+    async def slow_async(self: Any, request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(http_delay)
+        response: httpx.Response = await async_request(self, request)
+        return response
+
+    async def slow_command(self: Any, *args: Any, **options: Any) -> Any:
+        await asyncio.sleep(redis_delay)
+        return await command(self, *args, **options)
+
+    monkeypatch.setattr(_TestClientTransport, "handle_request", slow_sync)
+    monkeypatch.setattr(httpx.ASGITransport, "handle_async_request", slow_async)
+    monkeypatch.setattr(RedisClient, "execute_command", slow_command)
+
+
 @pytest.fixture(autouse=True)
 def fake_redis_for_apps(monkeypatch: pytest.MonkeyPatch) -> None:
     """Apps built in tests get a private in-memory Redis, never a real server."""

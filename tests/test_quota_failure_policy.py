@@ -26,7 +26,7 @@ from app.quota.quota import reserve_request_quota
 from app.quota.reservation import NO_RESERVATION
 from app.router.deployment import Deployment
 from app.router.registry import ModelRegistry
-from tests.conftest import AuthedClient, model_config
+from tests.conftest import SLOW_MS, AuthedClient, model_config
 from tests.test_budget_limit import PRICES
 from tests.test_budget_limit import request as chat_request
 from tests.test_rpm_limit import auth as limited_auth
@@ -543,7 +543,12 @@ def test_a_storm_during_an_outage_does_not_flood_the_log(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     unreachable_redis(monkeypatch)
-    with make_client() as client, caplog.at_level(logging.WARNING, logger="app.quota.guard"):
+    # A cooldown no test can outlast: with the default 5 s a slow machine would see the breaker
+    # try Redis again mid-test, and log again, which is correct behaviour but a different test.
+    with (
+        make_client(quota_breaker_cooldown=3600) as client,
+        caplog.at_level(logging.WARNING, logger="app.quota.guard"),
+    ):
         secret = client.issue_key(rpm_limit=100)
 
         for _ in range(60):
@@ -601,9 +606,11 @@ def test_a_hung_redis_slows_only_the_first_few_requests(
 
     assert all(d >= 0.25 for d in durations[:3])  # each of these waited out the timeout
     # Then the gateway stopped waiting. Medians, not maxima: one request can be delayed by a busy
-    # machine without that meaning the gateway waited for Redis.
-    assert statistics.median(durations[3:]) < 0.15
-    assert sum(durations[3:]) < 7 * 0.3 * 0.75  # well under what seven full timeouts would cost
+    # machine without that meaning the gateway waited for Redis. (`make test-slow` adds a delay
+    # to every request, which is not the gateway's, so it is taken off.)
+    injected = SLOW_MS / 1000
+    assert statistics.median(durations[3:]) < 0.15 + injected
+    assert sum(durations[3:]) < 7 * (0.3 * 0.75 + injected)  # far below seven full timeouts
 
 
 # ---------- an outage and a recovery ----------
@@ -684,6 +691,7 @@ def test_an_outage_in_the_middle_of_a_request_does_not_fail_it(
     with make_client(DiesMidRequest(), quota_failure_mode=mode, **FAST_BREAKER) as client:
         secret = client.issue_key(tpm_limit=1_000)
 
+        started = time.monotonic()
         response = chat(client, secret, max_tokens=92)  # ... so it cannot be settled
         redis.down = False
 
@@ -693,9 +701,11 @@ def test_an_outage_in_the_middle_of_a_request_does_not_fail_it(
 
         assert client.portal is not None
         left = client.portal.call(tokens)
+        refill = 1_000 / 60 * (time.monotonic() - started)  # 1,000 a minute, for as long as it ran
 
     assert response.status_code == 200  # the reply was already produced and is delivered
-    assert 895 <= left <= 905  # the key stays charged the full 100-token estimate, never less
+    # the key stays charged the full 100-token estimate, never less
+    assert 895 <= left <= min(1_000, 900 + refill + 5)
 
 
 def test_requests_that_need_no_redis_are_unaffected_by_the_breaker(

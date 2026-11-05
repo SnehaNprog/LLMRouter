@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import time
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -32,6 +33,7 @@ from app.usage.record import LogEntry, RequestLogger
 from tests.conftest import AuthedClient
 from tests.test_db import alembic_config
 from tests.test_rpm_limit import Clock, chat, make_client
+from tests.timing import balance_range
 
 KEY = "tpm-key"
 
@@ -444,12 +446,14 @@ def test_unused_reservations_are_given_back_so_normal_traffic_flows() -> None:
     with make_client() as client:  # each reply uses 15 tokens, but 520 are reserved up front
         secret = client.issue_key(tpm_limit=1_000)
 
+        started = time.monotonic()
         statuses = [chat(client, secret).status_code for _ in range(20)]
 
         remaining = bucket_tokens(client)
+        low, high = balance_range(20 * 15, started)
 
     assert statuses == [200] * 20  # without settling, the second request would already fail
-    assert 690 <= remaining <= 715  # 1000 minus 20 * 15, plus a little refill
+    assert low <= remaining <= high  # 1000 minus 20 * 15, plus the refill while it ran
 
 
 def test_overspending_is_charged_and_slows_the_next_request() -> None:
@@ -457,13 +461,15 @@ def test_overspending_is_charged_and_slows_the_next_request() -> None:
     with make_client(heavy) as client:
         secret = client.issue_key(tpm_limit=1_000)
 
+        started = time.monotonic()
         first = chat(client, secret)
         second = chat(client, secret)
 
         left = bucket_tokens(client)
+        low, high = balance_range(800, started)
 
     assert first.status_code == 200
-    assert 195 <= left <= 215  # 1000 - 800 used
+    assert low <= left <= high  # 1000 - 800 used, plus the refill while it ran
     assert second.status_code == 429
     error = second.json()["error"]
     assert error["code"] == "rate_limit_exceeded"
@@ -538,11 +544,13 @@ def test_streams_are_settled_from_the_reported_usage() -> None:
     with make_client(provider) as client:
         secret = client.issue_key(tpm_limit=1_000)
 
+        started = time.monotonic()
         statuses = [chat(client, secret, stream=True).status_code for _ in range(10)]
         remaining = bucket_tokens(client)
+        low, high = balance_range(10 * 50, started)
 
     assert statuses == [200] * 10
-    assert 495 <= remaining <= 520  # 1000 - 10 * 50, plus a little refill
+    assert low <= remaining <= high  # 1000 - 10 * 50, plus the refill while it ran
 
 
 def test_streams_without_usage_are_settled_from_the_text_sent() -> None:
@@ -551,11 +559,13 @@ def test_streams_without_usage_are_settled_from_the_text_sent() -> None:
     with make_client(provider) as client:
         secret = client.issue_key(tpm_limit=1_000)
 
+        started = time.monotonic()
         statuses = [chat(client, secret, stream=True).status_code for _ in range(10)]
         remaining = bucket_tokens(client)
+        low, high = balance_range(10 * (8 + 12), started)
 
     assert statuses == [200] * 10
-    assert 795 <= remaining <= 815  # 10 * (8 + 12) tokens used
+    assert low <= remaining <= high  # 10 * (8 + 12) tokens used, plus the refill while it ran
 
 
 def test_a_stream_that_fails_to_start_gives_everything_back() -> None:
